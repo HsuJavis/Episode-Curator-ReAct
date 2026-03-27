@@ -152,17 +152,28 @@ def _resolve_auth(api_key: str | None = None) -> dict:
         return {"api_key": api_key}
     if os.environ.get("ANTHROPIC_API_KEY"):
         return {"api_key": os.environ["ANTHROPIC_API_KEY"]}
-    creds_path = Path.home() / ".claude" / ".credentials.json"
-    if creds_path.exists():
-        creds = json.loads(creds_path.read_text())
-        oauth = creds.get("claudeAiOauth", {})
-        token = oauth.get("accessToken")
-        if token:
-            return {"api_key": token}
+    token = _read_oauth_token()
+    if token:
+        return {"api_key": token}
     raise ValueError(
         "No API key found. Set ANTHROPIC_API_KEY env var, pass api_key parameter, "
         "or ensure ~/.claude/.credentials.json contains a valid OAuth token."
     )
+
+
+def _read_oauth_token() -> str | None:
+    """Read fresh OAuth token from ~/.claude/.credentials.json."""
+    creds_path = Path.home() / ".claude" / ".credentials.json"
+    if creds_path.exists():
+        creds = json.loads(creds_path.read_text())
+        oauth = creds.get("claudeAiOauth", {})
+        return oauth.get("accessToken")
+    return None
+
+
+def _is_oauth_auth(api_key: str | None) -> bool:
+    """Check if we're using OAuth (no explicit api_key or env var)."""
+    return api_key is None and not os.environ.get("ANTHROPIC_API_KEY")
 
 
 class ReActAgent:
@@ -185,9 +196,18 @@ class ReActAgent:
         self.max_iterations = max_iterations
         self.max_tokens = max_tokens
         self.system_prompt = system_prompt or self.DEFAULT_SYSTEM_PROMPT
+        self._uses_oauth = _is_oauth_auth(api_key)
         auth = _resolve_auth(api_key)
         self._client = anthropic.Anthropic(**auth)
         self._manager = SkillPluginManager()
+
+    def _refresh_client_if_needed(self):
+        """Re-read OAuth token from disk (Claude Code may have refreshed it)."""
+        if not self._uses_oauth:
+            return
+        token = _read_oauth_token()
+        if token and token != self._client.api_key:
+            self._client = anthropic.Anthropic(api_key=token)
 
     def register_skill(self, plugin: SkillPlugin) -> ReActAgent:
         self._manager.register(plugin)
@@ -215,6 +235,9 @@ class ReActAgent:
             extra = ctx.metadata.get("system_prompt_extra", "")
             if extra:
                 system = f"{system}\n\n{extra}"
+
+            # Refresh OAuth token if needed (Claude Code may have rotated it)
+            self._refresh_client_if_needed()
 
             # API call
             api_params = {

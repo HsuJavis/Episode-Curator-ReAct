@@ -408,9 +408,20 @@ class Curator:
 }"""
 
     def __init__(self, api_key: str | None = None, model: str = "claude-haiku-4-5-20251001"):
+        from react_agent import _is_oauth_auth, _read_oauth_token
+        self._uses_oauth = _is_oauth_auth(api_key)
         auth = _resolve_auth(api_key)
         self._client = anthropic.Anthropic(**auth)
         self._model = model
+
+    def _refresh_client_if_needed(self):
+        """Re-read OAuth token from disk if using OAuth auth."""
+        if not self._uses_oauth:
+            return
+        from react_agent import _read_oauth_token
+        token = _read_oauth_token()
+        if token and token != self._client.api_key:
+            self._client = anthropic.Anthropic(api_key=token)
 
     def _format_messages(self, messages: list[dict]) -> str:
         """Format messages with indices for Curator input."""
@@ -470,6 +481,7 @@ class Curator:
 
         user_content = f"{formatted_index}\n\n請處理以下新的對話記錄：\n{formatted_msgs}"
 
+        self._refresh_client_if_needed()
         response = self._client.messages.create(
             model=self._model,
             max_tokens=800,
@@ -507,6 +519,7 @@ class Curator:
     def generate_digest(self, summaries: list[str], tag: str) -> str:
         """Generate a digest summary from multiple episode summaries."""
         content = f"將以下 [{tag}] 主題的 episode 摘要歸納為一句話：\n" + "\n".join(f"- {s}" for s in summaries)
+        self._refresh_client_if_needed()
         response = self._client.messages.create(
             model=self._model,
             max_tokens=200,
