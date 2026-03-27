@@ -318,3 +318,286 @@ class Curator:
             result["facts"] = []
 
         return result
+
+    def generate_digest(self, summaries: list[str], tag: str) -> str:
+        """Generate a digest summary from multiple episode summaries."""
+        content = f"將以下 [{tag}] 主題的 episode 摘要歸納為一句話：\n" + "\n".join(f"- {s}" for s in summaries)
+        response = self._client.messages.create(
+            model=self._model,
+            max_tokens=200,
+            system="你是摘要助手。將多條摘要歸納為一句話概述。只回傳歸納結果，不要其他內容。",
+            messages=[{"role": "user", "content": content}],
+        )
+        for block in response.content:
+            if block.type == "text":
+                return block.text.strip()
+        return summaries[0] if summaries else ""
+
+
+# ============================================================
+# EpisodeCuratorPlugin — SkillPlugin implementation
+# ============================================================
+
+class EpisodeCuratorPlugin(SkillPlugin):
+    """Plugin that manages context window via episode-based compression."""
+
+    RECALL_TOOL = {
+        "name": "recall_episode",
+        "description": (
+            "Retrieve a previously stored conversation episode. "
+            "Use episode_id for direct lookup, or search_query to search by topic. "
+            "Optionally filter by recent_hours."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "episode_id": {
+                    "type": "string",
+                    "description": "Direct episode ID (e.g. '001')",
+                },
+                "search_query": {
+                    "type": "string",
+                    "description": "Search query to find episodes by topic",
+                },
+                "recent_hours": {
+                    "type": "number",
+                    "description": "Only search episodes from the last N hours",
+                },
+            },
+        },
+    }
+
+    # Keyword patterns for rule-based fact extraction
+    FACT_PATTERNS = [
+        r"(?:我(?:叫|是|的名字是))\s*(\S+)",
+        r"(?:我(?:用|使用|偏好))\s*(.+?)(?:[,，。]|$)",
+        r"(?:我們(?:用|使用))\s*(.+?)(?:[,，。]|$)",
+        r"(?:技術棧|tech stack).*?[:：]\s*(.+?)(?:[,，。]|$)",
+    ]
+
+    def __init__(
+        self,
+        store: EpisodeStore,
+        curator: Curator,
+        threshold: int = 80000,
+        preserve_recent: int = 6,
+    ):
+        self._store = store
+        self._curator = curator
+        self._threshold = threshold
+        self._preserve_recent = preserve_recent
+
+    @property
+    def name(self) -> str:
+        return "episode_curator"
+
+    def get_tools(self) -> list[dict]:
+        return [self.RECALL_TOOL]
+
+    def execute_tool(self, name: str, tool_input: dict) -> Any:
+        if name != "recall_episode":
+            raise ValueError(f"Unknown tool: {name}")
+        return self._recall_episode(tool_input)
+
+    def _recall_episode(self, tool_input: dict) -> str:
+        episode_id = tool_input.get("episode_id")
+        search_query = tool_input.get("search_query")
+        recent_hours = tool_input.get("recent_hours")
+
+        if episode_id:
+            ep = self._store.load_episode(episode_id)
+            if ep is None:
+                return f"Episode #{episode_id} not found."
+            return self._format_episode_output(ep)
+
+        if search_query:
+            results = self._store.search_episodes(search_query, limit=3, recent_hours=recent_hours)
+            if not results:
+                return f"No episodes found for '{search_query}'."
+            parts = []
+            for r in results:
+                ep = self._store.load_episode(r["id"])
+                if ep:
+                    parts.append(self._format_episode_output(ep))
+            return "\n\n".join(parts)
+
+        return "Please provide either episode_id or search_query."
+
+    def _format_episode_output(self, ep: dict) -> str:
+        header = f"── Episode #{ep['id']}: {ep['title']} | {ep.get('created_at', '')} ──"
+        msgs = []
+        for msg in ep.get("messages", []):
+            role = msg.get("role", "?")
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                parts = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        parts.append(block["text"])
+                    elif isinstance(block, dict):
+                        parts.append(str(block))
+                content = " ".join(parts)
+            msgs.append(f"[{role}] {content}")
+        return header + "\n" + "\n".join(msgs)
+
+    # --- Hooks ---
+
+    def on_agent_start(self, ctx: AgentContext) -> None:
+        """Inject facts and global index into system_prompt_extra."""
+        parts = []
+
+        facts = self._store.get_facts()
+        if facts:
+            parts.append("已知事實：\n" + "\n".join(f"- {f}" for f in facts))
+
+        global_index = self._store.build_global_index()
+        if global_index:
+            parts.append("對話歷史索引：\n" + global_index)
+
+        if parts:
+            ctx.metadata["system_prompt_extra"] = "\n\n".join(parts)
+
+    def on_token_usage(self, ctx: AgentContext, input_tokens: int, output_tokens: int) -> None:
+        """Core compression logic — triggered when input_tokens exceed threshold."""
+        if input_tokens < self._threshold:
+            return
+
+        messages = ctx.messages
+        if len(messages) <= self._preserve_recent + 1:
+            return  # Not enough messages to compress
+
+        # Keep first message (original question) and last N messages
+        first_msg = messages[0]
+        cut_point = self._find_safe_cut_point(messages, len(messages) - self._preserve_recent)
+        to_archive = messages[1:cut_point]
+        to_keep = messages[cut_point:]
+
+        if not to_archive:
+            return
+
+        # Call Curator to segment
+        result = self._curator.process(to_archive, self._store._index)
+
+        # Save each segment as an episode
+        for segment in result.get("segments", []):
+            indices = segment.get("message_indices", [])
+            if not indices:
+                continue
+            ep_messages = [to_archive[i] for i in indices if i < len(to_archive)]
+            if not ep_messages:
+                continue
+
+            ep_id = self._store._next_episode_id()
+            self._store.save_episode(
+                episode_id=ep_id,
+                messages=ep_messages,
+                title=segment.get("title", "Untitled"),
+                summary=segment.get("summary", ""),
+                tags=segment.get("tags", ["misc"]),
+                continues_episode=segment.get("continues_episode"),
+            )
+
+        # Save facts
+        if result.get("facts"):
+            self._store.add_facts(result["facts"])
+
+        # Rebuild ctx.messages — maintain user/assistant alternation
+        global_index = self._store.build_global_index()
+        ctx.messages = [
+            first_msg,
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "好的，讓我來處理你的問題。"}
+            ]},
+            {"role": "user", "content": f"以下是之前的對話摘要索引：\n{global_index}"},
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "了解，我已掌握之前的對話脈絡。"}
+            ]},
+            *to_keep,
+        ]
+
+        # Update system_prompt_extra
+        parts = []
+        facts = self._store.get_facts()
+        if facts:
+            parts.append("已知事實：\n" + "\n".join(f"- {f}" for f in facts))
+        if global_index:
+            parts.append("對話歷史索引：\n" + global_index)
+        if parts:
+            ctx.metadata["system_prompt_extra"] = "\n\n".join(parts)
+
+    def on_agent_end(self, ctx: AgentContext, final_answer: str) -> Optional[str]:
+        """Rule-based fact extraction (no LLM call)."""
+        for msg in ctx.messages:
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content", "")
+            if not isinstance(content, str):
+                continue
+            extracted = []
+            for pattern in self.FACT_PATTERNS:
+                matches = re.findall(pattern, content, re.IGNORECASE)
+                for match in matches:
+                    match = match.strip()
+                    if match and len(match) > 1:
+                        extracted.append(match)
+            if extracted:
+                self._store.add_facts(extracted)
+        return None
+
+    @staticmethod
+    def _find_safe_cut_point(messages: list, target: int) -> int:
+        """Find a safe cut point that doesn't split tool_use/tool_result pairs."""
+        cut = target
+
+        # Scan backward to ensure we don't split a tool_use/tool_result pair
+        while cut > 1:
+            msg = messages[cut - 1]
+            content = msg.get("content", [])
+
+            if isinstance(content, list):
+                has_tool_result = any(
+                    isinstance(b, dict) and b.get("type") == "tool_result"
+                    for b in content
+                )
+                if has_tool_result:
+                    cut -= 1
+                    continue
+
+                has_tool_use = any(
+                    (isinstance(b, dict) and b.get("type") == "tool_use") or
+                    (hasattr(b, "type") and b.type == "tool_use")
+                    for b in content
+                )
+                if has_tool_use:
+                    cut -= 1
+                    continue
+
+            break
+
+        return max(cut, 1)
+
+
+# ============================================================
+# Factory function
+# ============================================================
+
+def create_agent(
+    worker_model: str = "claude-sonnet-4-20250514",
+    curator_model: str = "claude-haiku-4-5-20251001",
+    threshold: int = 80000,
+    max_iterations: int = 30,
+    storage_dir: str | None = None,
+    api_key: str | None = None,
+) -> ReActAgent:
+    """Create a ReActAgent with the EpisodeCuratorPlugin pre-configured."""
+    store = EpisodeStore(storage_dir)
+    curator = Curator(api_key=api_key, model=curator_model)
+    plugin = EpisodeCuratorPlugin(store, curator, threshold=threshold)
+
+    agent = ReActAgent(
+        model=worker_model,
+        max_iterations=max_iterations,
+        api_key=api_key,
+    )
+    agent.register_skill(plugin)
+    return agent
