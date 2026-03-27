@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["react_agent", "episode_curator"]
+
+[project]
+name = "episode-curator-react"
+version = "0.1.0"
+description = "ReAct Agent with intelligent context management via Episode Curator"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-playwright",
+    "playwright",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "llm: tests that require real Anthropic API calls",
+    "e2e: end-to-end Playwright browser tests",
+]
