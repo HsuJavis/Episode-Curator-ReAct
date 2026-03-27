@@ -131,27 +131,212 @@ class EpisodeStore:
         results.sort(key=lambda x: x["score"], reverse=True)
         return results[:limit]
 
-    def build_global_index(self) -> str:
-        """Build global index string — concatenation of all episode summaries.
+    def build_global_index(self, curator: Curator | None = None) -> str:
+        """Build global index with temporal resolution decay.
 
-        This is the simple version (no temporal decay). Phase 6 adds decay.
+        - Recent 48h: individual episode lines from index.json
+        - 48h-2weeks: daily digests from digests/daily/
+        - 2weeks+: weekly digests from digests/weekly/
+
+        If curator is provided, missing digests for past periods will be generated
+        (max 3 per call).
         """
         if not self._index:
             return ""
 
-        # Group by tag
-        tag_groups: dict[str, list] = {}
+        now = datetime.now()
+        h48 = timedelta(hours=48)
+        w2 = timedelta(weeks=2)
+
+        # Generate missing digests if curator available
+        if curator:
+            self._check_and_generate_digests(curator, max_new=3)
+
+        # Classify episodes by age
+        recent = []     # <48h
+        mid_range = []  # 48h-2w
+        old = []        # >2w
+
         for ep_id, entry in sorted(self._index.items()):
-            for tag in entry.get("tags", ["untagged"]):
-                tag_groups.setdefault(tag, []).append((ep_id, entry))
+            created = datetime.fromisoformat(entry["created_at"])
+            age = now - created
+            if age < h48:
+                recent.append((ep_id, entry))
+            elif age < w2:
+                mid_range.append((ep_id, entry))
+            else:
+                old.append((ep_id, entry))
 
         lines = []
-        for tag in sorted(tag_groups.keys()):
-            lines.append(f"## [{tag}]")
-            for ep_id, entry in tag_groups[tag]:
-                rel_time = self.format_time(entry["created_at"])
-                lines.append(f"  #{ep_id} ({rel_time}) — {entry['summary']}")
+
+        # Recent: individual lines grouped by tag
+        if recent:
+            tag_groups: dict[str, list] = {}
+            for ep_id, entry in recent:
+                for tag in entry.get("tags", ["untagged"]):
+                    tag_groups.setdefault(tag, []).append((ep_id, entry))
+            for tag in sorted(tag_groups.keys()):
+                lines.append(f"## [{tag}]")
+                for ep_id, entry in tag_groups[tag]:
+                    rel_time = self.format_time(entry["created_at"])
+                    lines.append(f"  #{ep_id} ({rel_time}) — {entry['summary']}")
+
+        # Mid-range: daily digests
+        if mid_range:
+            daily_digests = self._get_daily_digests(mid_range)
+            if daily_digests:
+                lines.append("## [近期匯總]")
+                for line in daily_digests:
+                    lines.append(f"  {line}")
+
+        # Old: weekly digests
+        if old:
+            weekly_digests = self._get_weekly_digests(old)
+            if weekly_digests:
+                lines.append("## [歷史匯總]")
+                for line in weekly_digests:
+                    lines.append(f"  {line}")
+
         return "\n".join(lines)
+
+    def _get_daily_digests(self, episodes: list[tuple[str, dict]]) -> list[str]:
+        """Get daily digest lines for mid-range episodes."""
+        # Group by date+tag
+        day_tag_groups: dict[str, list] = {}
+        for ep_id, entry in episodes:
+            created = datetime.fromisoformat(entry["created_at"])
+            date_str = created.strftime("%Y-%m-%d")
+            for tag in entry.get("tags", ["untagged"]):
+                key = f"{date_str}_{tag}"
+                day_tag_groups.setdefault(key, []).append((ep_id, entry))
+
+        lines = []
+        for key in sorted(day_tag_groups.keys()):
+            date_str, tag = key.rsplit("_", 1)
+            eps = day_tag_groups[key]
+            digest_key = f"daily_{key}"
+
+            if digest_key in self._digest_index:
+                summary = self._digest_index[digest_key]["summary"]
+            else:
+                # Fallback: concatenate summaries
+                summaries = [e["summary"] for _, e in eps]
+                summary = "; ".join(summaries)
+
+            lines.append(f"{date_str} [{tag}] — {summary} ({len(eps)}段)")
+        return lines
+
+    def _get_weekly_digests(self, episodes: list[tuple[str, dict]]) -> list[str]:
+        """Get weekly digest lines for old episodes."""
+        # Group by week+tag
+        week_tag_groups: dict[str, list] = {}
+        for ep_id, entry in episodes:
+            created = datetime.fromisoformat(entry["created_at"])
+            year, week, _ = created.isocalendar()
+            week_str = f"{year}-W{week:02d}"
+            for tag in entry.get("tags", ["untagged"]):
+                key = f"{week_str}_{tag}"
+                week_tag_groups.setdefault(key, []).append((ep_id, entry))
+
+        lines = []
+        for key in sorted(week_tag_groups.keys()):
+            week_str, tag = key.rsplit("_", 1)
+            eps = week_tag_groups[key]
+            digest_key = f"weekly_{key}"
+
+            if digest_key in self._digest_index:
+                summary = self._digest_index[digest_key]["summary"]
+            else:
+                summaries = [e["summary"] for _, e in eps]
+                summary = "; ".join(summaries)
+
+            lines.append(f"{week_str} [{tag}] — {summary} ({len(eps)}段)")
+        return lines
+
+    def _check_and_generate_digests(self, curator: Curator, max_new: int = 3) -> int:
+        """Generate missing digests for past time periods. Returns count generated."""
+        now = datetime.now()
+        generated = 0
+
+        # Daily digests: for days that have ended (not today)
+        today = now.date()
+        day_tag_groups: dict[str, list] = {}
+        for ep_id, entry in self._index.items():
+            created = datetime.fromisoformat(entry["created_at"])
+            ep_date = created.date()
+            if ep_date >= today:
+                continue  # Skip today
+            age = now - created
+            if age > timedelta(weeks=2):
+                continue  # Skip old ones (they go to weekly)
+            date_str = ep_date.isoformat()
+            for tag in entry.get("tags", ["untagged"]):
+                key = f"{date_str}_{tag}"
+                day_tag_groups.setdefault(key, []).append((ep_id, entry))
+
+        for key, eps in sorted(day_tag_groups.items()):
+            if generated >= max_new:
+                break
+            digest_key = f"daily_{key}"
+            if digest_key in self._digest_index:
+                continue
+
+            date_str, tag = key.rsplit("_", 1)
+            summaries = [e["summary"] for _, e in eps]
+            summary = curator.generate_digest(summaries, tag)
+
+            self._digest_index[digest_key] = {
+                "summary": summary,
+                "episode_count": len(eps),
+                "episode_ids": [eid for eid, _ in eps],
+                "created_at": now.isoformat(),
+            }
+            # Save digest file
+            digest_data = {"summaries": summaries, "digest": summary, "tag": tag}
+            self._save_json(self._digests_daily_dir / f"{key}.json", digest_data)
+            generated += 1
+
+        # Weekly digests: for weeks that have ended (not this week)
+        this_week = today.isocalendar()[:2]  # (year, week)
+        week_tag_groups: dict[str, list] = {}
+        for ep_id, entry in self._index.items():
+            created = datetime.fromisoformat(entry["created_at"])
+            ep_week = created.date().isocalendar()[:2]
+            if ep_week >= this_week:
+                continue  # Skip this week
+            age = now - created
+            if age <= timedelta(weeks=2):
+                continue  # These are handled by daily
+            week_str = f"{ep_week[0]}-W{ep_week[1]:02d}"
+            for tag in entry.get("tags", ["untagged"]):
+                key = f"{week_str}_{tag}"
+                week_tag_groups.setdefault(key, []).append((ep_id, entry))
+
+        for key, eps in sorted(week_tag_groups.items()):
+            if generated >= max_new:
+                break
+            digest_key = f"weekly_{key}"
+            if digest_key in self._digest_index:
+                continue
+
+            week_str, tag = key.rsplit("_", 1)
+            summaries = [e["summary"] for _, e in eps]
+            summary = curator.generate_digest(summaries, tag)
+
+            self._digest_index[digest_key] = {
+                "summary": summary,
+                "episode_count": len(eps),
+                "episode_ids": [eid for eid, _ in eps],
+                "created_at": now.isoformat(),
+            }
+            digest_data = {"summaries": summaries, "digest": summary, "tag": tag}
+            self._save_json(self._digests_weekly_dir / f"{key}.json", digest_data)
+            generated += 1
+
+        if generated > 0:
+            self._save_json(self._digest_index_path, self._digest_index)
+
+        return generated
 
     def add_facts(self, facts: list[str]) -> None:
         """Add permanent facts (deduplicated, max 50)."""
@@ -450,7 +635,7 @@ class EpisodeCuratorPlugin(SkillPlugin):
         if facts:
             parts.append("已知事實：\n" + "\n".join(f"- {f}" for f in facts))
 
-        global_index = self._store.build_global_index()
+        global_index = self._store.build_global_index(curator=self._curator)
         if global_index:
             parts.append("對話歷史索引：\n" + global_index)
 
