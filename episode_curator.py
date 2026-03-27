@@ -189,3 +189,132 @@ class EpisodeStore:
             return f"{int(seconds / 604800)}週前"
         else:
             return f"{int(seconds / 2592000)}月前"
+
+
+# ============================================================
+# Curator — LLM-based topic segmentation
+# ============================================================
+
+class Curator:
+    """Second LLM that segments messages by topic."""
+
+    SYSTEM_PROMPT = """你是一個對話整理助手。你的工作是將一段對話訊息按主題分段。
+
+規則：
+1. 按主題分段，同一主題的訊息即使不相鄰也歸為一段
+2. 參考已有的主題索引，盡量複用已有的 tag
+3. 如果新訊息是已有主題的延續，summary 開頭標註「接續 #xxx：」
+4. continues_episode 是可選欄位，填入被延續的 episode ID
+5. 如果是全新主題，不填 continues_episode
+6. 提取重要的永久事實（使用者偏好、技術棧等）
+
+你必須回傳 JSON（不要包含 markdown code fence）：
+{
+  "segments": [
+    {
+      "title": "主題名",
+      "summary": "一句話摘要（如是延續，開頭加「接續 #xxx：」）",
+      "tags": ["tag1"],
+      "message_indices": [0, 1, 2],
+      "continues_episode": "001"
+    }
+  ],
+  "facts": ["事實1", "事實2"]
+}"""
+
+    def __init__(self, api_key: str | None = None, model: str = "claude-haiku-4-5-20251001"):
+        auth = _resolve_auth(api_key)
+        self._client = anthropic.Anthropic(**auth)
+        self._model = model
+
+    def _format_messages(self, messages: list[dict]) -> str:
+        """Format messages with indices for Curator input."""
+        lines = []
+        for i, msg in enumerate(messages):
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                # Handle structured content (tool_use, tool_result, etc.)
+                parts = []
+                for block in content:
+                    if isinstance(block, dict):
+                        if block.get("type") == "text":
+                            parts.append(block["text"])
+                        elif block.get("type") == "tool_use":
+                            parts.append(f"[tool_use: {block.get('name', '?')}]")
+                        elif block.get("type") == "tool_result":
+                            parts.append(f"[tool_result: {str(block.get('content', ''))[:100]}]")
+                    elif hasattr(block, "type"):
+                        if block.type == "text":
+                            parts.append(block.text)
+                        elif block.type == "tool_use":
+                            parts.append(f"[tool_use: {block.name}]")
+                content = " | ".join(parts) if parts else str(content)
+            # Truncate long content
+            if len(str(content)) > 200:
+                content = str(content)[:200] + "..."
+            lines.append(f"[{i}] [{role}] {content}")
+        return "\n".join(lines)
+
+    def _format_existing_index(self, existing_index: dict) -> str:
+        """Format existing index for Curator context."""
+        if not existing_index:
+            return "（尚無已有主題）"
+        lines = ["已有主題索引："]
+        for ep_id, entry in sorted(existing_index.items()):
+            tags = ", ".join(entry.get("tags", []))
+            lines.append(f"  #{ep_id} [{tags}] {entry.get('title', '')}")
+        return "\n".join(lines)
+
+    def _parse_json_response(self, text: str) -> dict:
+        """Parse JSON from Curator response, handling code fences."""
+        # Strip markdown code fences
+        text = text.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*\n?", "", text)
+            text = re.sub(r"\n?```\s*$", "", text)
+        return json.loads(text)
+
+    def process(self, messages: list[dict], existing_index: dict) -> dict:
+        """Segment messages by topic.
+
+        Returns: {"segments": [...], "facts": [...]}
+        """
+        formatted_msgs = self._format_messages(messages)
+        formatted_index = self._format_existing_index(existing_index)
+
+        user_content = f"{formatted_index}\n\n請處理以下新的對話記錄：\n{formatted_msgs}"
+
+        response = self._client.messages.create(
+            model=self._model,
+            max_tokens=800,
+            system=self.SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_content}],
+        )
+
+        response_text = ""
+        for block in response.content:
+            if block.type == "text":
+                response_text += block.text
+
+        try:
+            result = self._parse_json_response(response_text)
+        except (json.JSONDecodeError, ValueError):
+            # Fallback: single segment with all messages
+            result = {
+                "segments": [{
+                    "title": "對話記錄",
+                    "summary": "混合主題對話",
+                    "tags": ["misc"],
+                    "message_indices": list(range(len(messages))),
+                }],
+                "facts": [],
+            }
+
+        # Validate structure
+        if "segments" not in result:
+            result["segments"] = []
+        if "facts" not in result:
+            result["facts"] = []
+
+        return result
