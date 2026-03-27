@@ -380,3 +380,33 @@ pip install anthropic
 9. **主題延續**：第二次壓縮時 Curator 能看到已有 index，複用 tag，摘要標註「接續 #xxx」，不產出不一致的新 tag
 10. **時間衰減索引**：build_global_index 對 48h 內逐條顯示、2 週內按天匯總、更早按週匯總。日/週 digest 只為已過去的時段生成且 immutable
 
+## Progress
+
+| Phase | 描述 | 狀態 | 測試數 | Commit |
+|-------|------|------|--------|--------|
+| 0 | 專案骨架 (pyproject.toml, .gitignore, tests/) | DONE | — | `fdd07fb` |
+| 1 | react_agent.py — AgentContext, SkillPlugin, SkillPluginManager | DONE | 12 | `e0ad16f` |
+| 2 | react_agent.py — ReActAgent + ReAct Loop + OAuth auth | DONE | 4 (真實 API) | `d494cdf` |
+| 3 | episode_curator.py — EpisodeStore (磁碟存取層) | DONE | 21 | `cd08c0c` |
+| 4 | episode_curator.py — Curator (LLM 主題切分) | DONE | 4 (真實 API) | `f42cc24` |
+| 5 | EpisodeCuratorPlugin (壓縮 + recall + facts) | DONE | 10 (真實 API) | `fd8c7dc` |
+| 6 | Temporal Resolution Decay (日/週匯總) | DONE | 7 (真實 API) | `c3ea9e6` |
+| 7 | create_agent() 工廠 + 整合測試 | DONE | 5 (真實 API) | `6e32052` |
+| 8 | E2E Playwright 瀏覽器測試 | DONE | 5 (真實 API + Chromium) | `62454ca` |
+| 9 | 收尾 — 全部 68 測試通過 | DONE | 68 total | — |
+
+### Spec 測試覆蓋對照
+
+| # | Spec 測試項目 | 測試檔案 | 狀態 |
+|---|-------------|---------|------|
+| 1 | 基本 ReAct loop | `test_react_loop.py` | PASS |
+| 2 | 壓縮觸發 | `test_plugin.py` | PASS |
+| 3 | 主題切分 | `test_curator.py` | PASS |
+| 4 | Episode 不可變 | `test_episode_store.py` | PASS |
+| 5 | 全局索引不衰減 | `test_episode_store.py` | PASS |
+| 6 | recall_episode | `test_plugin.py` + `test_episode_store.py` | PASS |
+| 7 | messages 格式 | `test_react_loop.py` + `test_plugin.py` | PASS |
+| 8 | facts 持久化 | `test_episode_store.py` | PASS |
+| 9 | 主題延續 | `test_curator.py` | PASS |
+| 10 | 時間衰減索引 | `test_temporal_decay.py` | PASS |
+
