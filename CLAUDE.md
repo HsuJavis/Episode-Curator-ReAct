@@ -123,10 +123,10 @@ tool_result 回饋格式（Anthropic 要求）：
 儲存層，操作磁碟上的 episodes、index、facts。
 
 關鍵方法：
-- `save_episode(id, messages, title, summary, tags)`: 存完整原文 + index 條目（immutable）
+- `save_episode(id, messages, title, summary, tags, salience, dimensions)`: 存完整原文 + index 條目（immutable），salience 和 dimensions 一併存入
 - `load_episode(id)`: 讀原文（100% 無損）
-- `build_global_index()`: 拼接所有 episode 摘要，按 tag 分組，帶相對時間
-- `search_episodes(query, limit, recent_hours)`: 搜尋 title/summary/tags，支援時間過濾
+- `build_global_index()`: 拼接所有 episode 摘要，按 tag 分組，帶相對時間。**同一時間層內按 salience 降序排列**
+- `search_episodes(query, limit, recent_hours)`: 搜尋 title/summary/tags，**salience 作為加權因子影響排名**，支援時間過濾
 - `add_facts(facts)`: 新增永久事實（去重，最多 50 條）
 
 index.json 的每個條目結構：
@@ -136,7 +136,16 @@ index.json 的每個條目結構：
   "summary": "設計 products 表結構，確認 7 個產品，討論 index 策略",
   "tags": ["database", "postgresql"],
   "message_count": 6,
-  "created_at": "2026-03-26T14:30:00"    ← 絕對時間，永不修改
+  "created_at": "2026-03-26T14:30:00",    ← 絕對時間，永不修改
+  "salience": 0.6,                         ← 認知權重（磁碟上只標記不排序）
+  "dimensions": {                          ← 多維度認知摘要
+    "decisions": ["選擇 PostgreSQL 因為團隊熟悉"],
+    "corrections": [],
+    "insights": ["發現需要 7 個產品表"],
+    "pending": ["index 策略待定"],
+    "user_intent": "設計資料庫結構",
+    "outcome": "positive"
+  }
 }
 ```
 
@@ -144,7 +153,33 @@ index.json 的每個條目結構：
 
 ### Curator
 
-第二個 LLM，唯一職責：把一段 messages 按主題切分，每段寫 title + summary + tags。
+第二個 LLM，職責：把一段 messages 按主題切分，每段寫 title + summary + tags + **多維度認知摘要** + **salience 分數**。
+
+#### 認知加權摘要 — Cognitive Salience Scoring
+
+人對一段對話的記憶不是均勻的。認知科學告訴我們某些片段天生更「難忘」。Curator 在摘要時必須捕捉這些高認知權重的片段，產出結構化的多維度摘要和 salience 分數。
+
+**6 個維度與認知科學原則對應：**
+
+| 維度 | 內容 | 認知科學原則 |
+|------|------|-------------|
+| `decisions` | 做了什麼決定 + 為什麼 | **Levels of Processing** — 深層處理（理解 why）比淺層（記住 what）更持久 |
+| `corrections` | 錯誤修正過程（tried X failed, switched to Y） | **Schema Violation + Emotional Tagging** — 打破預期 + 情緒喚起，編碼最強 |
+| `insights` | 洞察/發現 | **Von Restorff Effect** — 在相似事物中，異常的那個記得最清楚 |
+| `pending` | 還剩什麼沒做 | **Zeigarnik Effect** — 未完成任務的認知張力使記憶特別持久 |
+| `user_intent` | 使用者到底想要什麼 | **Goal-directed Memory** — 與目標綁定的記憶檢索效率最高 |
+| `outcome` | positive / negative / neutral | **Peak-End Rule** — 結尾決定整體記憶評價 |
+
+**Salience 分數（0.0 ~ 1.0）：**
+
+| 範圍 | 語義 | 典型場景 |
+|------|------|---------|
+| 0.0–0.3 | 低 — 普通資訊交換 | 確認型回覆、簡單查詢 |
+| 0.4–0.6 | 中 — 一般討論 | 包含一般決策或中等複雜度討論 |
+| 0.7–0.9 | 高 — 重要轉折 | 錯誤修正、重要決策、方向轉變 |
+| 1.0 | 極高 — 關鍵突破 | 重大架構決策、嚴重 bug 修復、突破性發現 |
+
+**Salience 的使用原則：磁碟上只標記不排序，填入 Worker context 前才按 salience 降序排列。**
 
 **主題延續感知**：Curator 壓縮時必須看到現有的 index（已有哪些 episode 和 tag）。這樣它能：
 - 複用已有的 tag（不自創新 tag，保持一致性）
@@ -176,7 +211,16 @@ Curator 輸出中，如果是延續主題：
     "summary": "接續 #001：為 products 表加入查詢 index，新增 sales 表",
     "tags": ["database"],
     "message_indices": [0, 1, 2, 3],
-    "continues_episode": "001"
+    "continues_episode": "001",
+    "salience": 0.6,
+    "dimensions": {
+      "decisions": ["決定為 products 表加 B-tree index 因為查詢以等值比對為主"],
+      "corrections": [],
+      "insights": ["發現 GIN index 不適合此場景"],
+      "pending": ["sales 表的 index 策略尚未決定"],
+      "user_intent": "優化資料庫查詢效能",
+      "outcome": "positive"
+    }
   }],
   "facts": [...]
 }
@@ -199,7 +243,16 @@ System prompt 要求 Curator 輸出 JSON：
       "summary": "一句話摘要（如是延續，開頭加「接續 #xxx：」）",
       "tags": ["tag1"],
       "message_indices": [0, 1, 2, 5],
-      "continues_episode": "001"
+      "continues_episode": "001",
+      "salience": 0.7,
+      "dimensions": {
+        "decisions": ["決定 X 因為 Y"],
+        "corrections": ["原本用 A 失敗，改用 B"],
+        "insights": ["發現 Z 的性價比最高"],
+        "pending": ["尚未處理 error handling"],
+        "user_intent": "使用者想建立高效的 CI pipeline",
+        "outcome": "positive"
+      }
     }
   ],
   "facts": ["事實1", "事實2"]
@@ -212,10 +265,14 @@ System prompt 中必須包含以下指引：
 - 如果新訊息是已有主題的延續，summary 開頭標註「接續 #xxx：」
 - `continues_episode` 是可選欄位，填入被延續的 episode ID
 - 如果是全新主題，不填 `continues_episode`
+- 為每個 segment 評估 `salience` 分數（0.0~1.0），越高表示認知權重越大
+- 填寫 `dimensions` 物件，包含 6 個維度：`decisions`（列表）、`corrections`（列表）、`insights`（列表）、`pending`（列表）、`user_intent`（字串）、`outcome`（"positive"/"negative"/"neutral"）
+- dimensions 中的列表維度可以為空陣列，但 `user_intent` 和 `outcome` 必填
+- salience 評分依據：包含錯誤修正 +0.3、包含重要決策 +0.2、包含方向轉變 +0.2、包含正向確認 +0.1、基線 0.3
 
 messages 格式化時帶編號 `[0] [user] ...`，讓 Curator 能用 `message_indices` 引用。
 
-Curator model 用 Haiku（便宜快速），max_tokens=800（多段需要更多 output）。
+Curator model 用 Haiku（便宜快速），max_tokens=1200（多段 + dimensions 需要更多 output）。
 
 ### EpisodeCuratorPlugin
 
@@ -286,6 +343,8 @@ def create_agent(
 
 9. **全局索引的時間解析度隨時間自然衰減**。近期逐條、中期按天匯總、遠期按週/月匯總。磁碟上的 episode 不動，匯總是展示層的事。
 
+10. **認知加權摘要**。Curator 為每個 segment 產出 salience（0.0~1.0）和 6 維度 dimensions。磁碟上 index.json 存 salience 和 dimensions 但不影響排序。填入 Worker context 時（`build_global_index()`）同一時間層內按 salience 降序排列。`search_episodes()` 的評分也受 salience 加權。向後相容：舊 episode 的 salience 預設 0.5，dimensions 預設空物件。
+
 ### 時間解析度衰減 — Temporal Resolution Decay
 
 人類記得昨天每小時做了什麼，但上個月只記得幾件大事。全局索引也應該如此。
@@ -325,8 +384,9 @@ def build_global_index(self):
     now = datetime.now()
     lines = []
 
-    # 近期（48h 內）：逐條，從 index.json
+    # 近期（48h 內）：逐條，從 index.json，按 salience 降序
     recent = [ep for ep in index if age(ep) < 48h]
+    recent.sort(key=lambda ep: ep.salience, reverse=True)
     for ep in recent:
         lines.append(f"#{ep.id} ({relative_time}) — {ep.summary}")
 
@@ -379,6 +439,8 @@ pip install anthropic
 8. **facts 持久化**：跨 session 保留，去重正確
 9. **主題延續**：第二次壓縮時 Curator 能看到已有 index，複用 tag，摘要標註「接續 #xxx」，不產出不一致的新 tag
 10. **時間衰減索引**：build_global_index 對 48h 內逐條顯示、2 週內按天匯總、更早按週匯總。日/週 digest 只為已過去的時段生成且 immutable
+11. **認知加權摘要**：Curator 能產出 salience 分數和 6 維度 dimensions，存入 index 且 recall 時可見
+12. **Salience 排序**：build_global_index 同一時間層內高 salience episode 排前面，search_episodes 結果受 salience 加權
 
 ## Progress
 
@@ -394,6 +456,7 @@ pip install anthropic
 | 7 | create_agent() 工廠 + 整合測試 | DONE | 5 (真實 API) | `6e32052` |
 | 8 | E2E Playwright 瀏覽器測試 | DONE | 5 (真實 API + Chromium) | `62454ca` |
 | 9 | 收尾 — 全部 68 測試通過 | DONE | 68 total | — |
+| 10 | 認知加權摘要 — salience + dimensions | DONE | 8 (3 真實 API) | — |
 
 ### Spec 測試覆蓋對照
 
@@ -409,4 +472,6 @@ pip install anthropic
 | 8 | facts 持久化 | `test_episode_store.py` | PASS |
 | 9 | 主題延續 | `test_curator.py` | PASS |
 | 10 | 時間衰減索引 | `test_temporal_decay.py` | PASS |
+| 11 | 認知加權摘要 | `test_curator.py` + `test_plugin.py` | PASS |
+| 12 | Salience 排序 | `test_episode_store.py` + `test_plugin.py` | PASS |
 

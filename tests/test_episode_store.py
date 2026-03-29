@@ -196,6 +196,70 @@ class TestFormatTime:
         assert "天前" in result
 
 
+class TestSalienceAndDimensions:
+    """Spec Test 11/12: Salience and dimensions storage and sorting."""
+
+    def test_save_and_load_salience(self, tmp_storage):
+        store = EpisodeStore(tmp_storage)
+        dims = {
+            "decisions": ["選擇 PostgreSQL"],
+            "corrections": [],
+            "insights": ["發現 GIN index 不適合"],
+            "pending": ["sales 表待定"],
+            "user_intent": "設計資料庫",
+            "outcome": "positive",
+        }
+        store.save_episode("001", [{"role": "user", "content": "q"}],
+                          "DB Design", "Design tables", ["database"],
+                          salience=0.8, dimensions=dims)
+
+        loaded = store.load_episode("001")
+        assert loaded["salience"] == 0.8
+        assert loaded["dimensions"] == dims
+
+        # Also in index
+        assert store._index["001"]["salience"] == 0.8
+        assert store._index["001"]["dimensions"] == dims
+
+    def test_salience_default(self, tmp_storage):
+        store = EpisodeStore(tmp_storage)
+        store.save_episode("001", [], "Test", "Summary", ["test"])
+
+        loaded = store.load_episode("001")
+        assert loaded["salience"] == 0.5
+        assert loaded["dimensions"] == {}
+
+    def test_search_salience_weighting(self, tmp_storage):
+        """High salience episodes should rank higher in search."""
+        store = EpisodeStore(tmp_storage)
+        store.save_episode("001", [{"role": "user", "content": "q"}],
+                          "DB Low", "database low salience", ["database"],
+                          salience=0.2)
+        store.save_episode("002", [{"role": "user", "content": "q"}],
+                          "DB High", "database high salience", ["database"],
+                          salience=0.9)
+
+        results = store.search_episodes("database")
+        assert len(results) == 2
+        # Higher salience should rank first
+        assert results[0]["id"] == "002"
+        assert results[1]["id"] == "001"
+
+    def test_global_index_salience_sorting(self, tmp_storage):
+        """Within same tag group, high salience episodes appear first."""
+        store = EpisodeStore(tmp_storage)
+        store.save_episode("001", [], "DB Low", "Low priority item", ["database"],
+                          salience=0.2)
+        store.save_episode("002", [], "DB High", "High priority item", ["database"],
+                          salience=0.9)
+
+        index = store.build_global_index()
+        # #002 (high salience) should appear before #001 (low salience)
+        pos_002 = index.index("#002")
+        pos_001 = index.index("#001")
+        assert pos_002 < pos_001, "High salience episode should appear first"
+
+
 class TestBuildGlobalIndex:
     def test_grouped_by_tag(self, tmp_storage):
         store = EpisodeStore(tmp_storage)
