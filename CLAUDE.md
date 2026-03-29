@@ -8,11 +8,17 @@
 
 ## 架構
 
-兩個檔案，一個插件：
+核心 + 插件：
 
 ```
 react_agent.py          ← 基礎 ReAct Agent + SkillPlugin Hook 系統
-episode_curator.py      ← 唯一的插件，解決 context window 問題
+episode_curator.py      ← Episode Curator 插件，解決 context window 問題
+system_tools.py         ← System Tools 插件 (read/write/grep/search/bash/web_search)
+hook_manager.py         ← Hook Manager 插件 (PreToolUse/PostToolUse/Stop)
+mcp_client.py           ← MCP Client 插件 (JSON-RPC over stdio)
+skill_loader.py         ← Skill Loader 插件 (SKILL.md frontmatter)
+cli_app.py              ← CLI TUI 介面 (Textual) + TUI Bridge 插件
+web_app.py              ← 最小 Web 介面 (E2E 測試用)
 ```
 
 ### 雙 LLM 架構
@@ -310,6 +316,207 @@ ctx.messages = [
 - `recent_hours`: 可選，只搜最近 N 小時
 - 原文回傳帶時間戳：`── Episode #001: PostgreSQL 資料庫設計 | 2026-03-26T14:30 ──`
 
+## 檔案 3: system_tools.py
+
+### SystemToolsPlugin
+
+提供 6 個系統工具讓 Worker LLM 操作檔案系統和 shell：
+
+| 工具 | 功能 | 關鍵參數 |
+|------|------|---------|
+| `read` | 讀取檔案，回傳帶行號的內容 | `file_path`, `offset`, `limit` |
+| `write` | 寫入檔案，自動建立目錄 | `file_path`, `content` |
+| `grep` | 用 regex 搜尋檔案內容 | `pattern`, `path`, `include`（glob 過濾） |
+| `search` | 用 glob 模式尋找檔案 | `pattern`, `path` |
+| `bash` | 執行 shell 命令 | `command`, `timeout`（預設 30s） |
+| `web_search` | 網路搜尋（stub） | `query` |
+
+設計原則：
+- 全部用 Python stdlib（pathlib, subprocess, re, glob），零外部依賴
+- bash 輸出上限 100KB，超過截斷
+- grep 最多回傳 500 個 match，掃描最多 1000 個檔案
+- 錯誤一律回傳 `Error: ...` 字串（不拋異常），讓 LLM 能讀懂
+
+## 檔案 4: hook_manager.py
+
+### HookManager
+
+使用者可透過 `hooks.json` 掛載前/後攔截邏輯。支援三種事件：
+
+| 事件 | 觸發時機 | 效果 |
+|------|---------|------|
+| `PreToolUse` | 工具執行前 | 可阻擋（`continue: false`）或放行 |
+| `PostToolUse` | 工具執行後 | 可附加系統訊息 |
+| `Stop` | Agent 準備結束時 | 可強制續跑（`continue: true`） |
+
+**hooks.json 格式**：
+```json
+{
+  "PreToolUse": [
+    {
+      "matcher": "Write|bash",
+      "hooks": [
+        {"type": "command", "command": "bash validate.sh", "timeout": 30}
+      ]
+    }
+  ],
+  "PostToolUse": [...],
+  "Stop": [...]
+}
+```
+
+**Matcher 語法**：
+- 精確名稱：`"bash"`
+- 多選：`"Write|bash|read"`（pipe 分隔）
+- 萬用：`"*"`
+
+**Hook 執行**：用 `subprocess.run()` 跑 command，stdin 傳入 JSON context，stdout 讀取 JSON 結果：
+```json
+{"continue": true, "systemMessage": "Validation passed"}
+```
+
+**HookManagerPlugin**：掛進 SkillPlugin 系統：
+- `before_action` hook → 呼叫 `run_pre_tool_use`，若 `continue=false` → 設 `tc["_blocked"]`
+- `after_action` hook → 呼叫 `run_post_tool_use`
+- `on_agent_end` hook → 呼叫 `run_stop`，若 `continue=true` → 回傳 `{"continue": True}`
+
+### react_agent.py 擴充
+
+**`_blocked` tool 支援**（`_react_loop` 內）：
+```python
+tc = self._manager.dispatch_before_action(ctx, tc)
+if tc.get("_blocked"):
+    result = tc["_blocked"]  # 跳過 route_tool_call
+```
+
+**Stop hook 續跑**：
+```python
+final_answer = self._manager.dispatch_on_agent_end(ctx, final_text)
+if isinstance(final_answer, dict) and final_answer.get("continue"):
+    ctx.messages.append({"role": "user", "content": final_answer.get("message")})
+    continue  # 重新進入 while loop
+```
+
+## 檔案 5: mcp_client.py
+
+### MCPManager
+
+讀取 `.mcp.json`，啟動 MCP server 子程序，透過 JSON-RPC over stdio 通訊。
+
+**`.mcp.json` 格式**：
+```json
+{
+  "server-name": {
+    "command": "python",
+    "args": ["server.py"],
+    "env": {"KEY": "value"}
+  }
+}
+```
+
+**JSON-RPC 協議**（line-delimited JSON over stdin/stdout）：
+```json
+→ {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+← {"jsonrpc": "2.0", "id": 1, "result": {"tools": [...]}}
+
+→ {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "echo", "arguments": {"text": "hi"}}}
+← {"jsonrpc": "2.0", "id": 2, "result": {"content": [{"type": "text", "text": "hi"}]}}
+```
+
+**工具命名**：`mcp__{server}__{tool}`（例如 `mcp__filesystem__read_file`）
+
+**Schema 轉換**：MCP 用 `inputSchema`（camelCase），Anthropic API 用 `input_schema`（snake_case），自動轉換。
+
+### MCPPlugin
+
+- `get_tools()` 回傳所有 server 的工具定義（已轉換格式、已加前綴）
+- `execute_tool()` 從工具名稱解析 server，呼叫 `manager.call_tool()`
+
+## 檔案 6: skill_loader.py
+
+### SkillManager
+
+從 `skills/` 目錄載入 SKILL.md 檔案，相容 Claude Code skill 格式。
+
+**目錄結構**：
+```
+skills/
+  commit/
+    SKILL.md
+  review-pr/
+    SKILL.md
+```
+
+**SKILL.md 格式**（YAML frontmatter）：
+```markdown
+---
+name: commit
+description: This skill helps create well-structured git commits.
+---
+
+# Commit Skill
+When creating a commit:
+1. Stage only relevant files
+2. Write a concise commit message
+```
+
+**Frontmatter 解析**：用 regex `^---\n(.*?)\n---` 提取，不依賴 pyyaml。
+
+### SkillLoaderPlugin
+
+- `on_agent_start`：建立 skill catalog 字串，附加到 `system_prompt_extra`
+- 格式：`Available skills:\n- commit: This skill helps...\n- review-pr: This skill reviews...`
+
+## 檔案 7: cli_app.py
+
+### TUI 介面（Textual）
+
+```
+┌───────────────────────────────────┬────────────────────────────┐
+│  ◈ Conversation                   │  ◈ Context                 │
+│  [user] question                  │  system ████░░░░  25%      │
+│  💭 thinking...                   │  tools  ██░░░░░░  12%      │
+│  🔧 recall_episode({query:db})    │  msgs   ██████░░  63%      │
+│  📋 Found 3 episodes...           ├────────────────────────────┤
+│  [assistant] answer               │  ◈ Episodes                │
+│                                   │  ● #002 sal:0.9 (2h前)    │
+│                                   │    Port fix                │
+│                                   │  ● #001 sal:0.6 (1d前)    │
+│                                   │    DB design               │
+├───────────────────────────────────┴────────────────────────────┤
+│  > Type your message...                                        │
+├────────────────────────────────────────────────────────────────┤
+│  ○ │ iter 2/30 │ in: 15.8k │ out: 2.1k │ 3 eps │ 4.7s       │
+└────────────────────────────────────────────────────────────────┘
+```
+
+### TUIPlugin
+
+Hook-only 插件（無工具），捕捉 ReAct loop 事件推送到 Textual App：
+
+| Hook | 推送事件 |
+|------|---------|
+| `on_thought` | 💭 thought 文字 → 左側面板 |
+| `before_action` | 🔧 tool name + input → 左側面板 |
+| `on_observation` | 📋 tool result → 左側面板 |
+| `on_token_usage` | status bar + context usage 更新 |
+| `on_agent_end` | ✓ 最終答案 → 左側面板 |
+
+**即時更新**：Agent 在 `asyncio.to_thread()` 中跑（blocking sync），TUIPlugin 用 `app.call_from_thread()` 推事件到 Textual 主線程。
+
+### Status Line
+
+```
+ ◉ │ iter 2/30 │ in: 15.8k / 80k │ out: 2.1k │ 3 eps │ 4.7s
+ ↑      ↑              ↑              ↑          ↑       ↑
+ │      │              │              │          │       └─ 經過時間
+ │      │              │              │          └─ episode 數量
+ │      │              │              └─ 累計輸出 tokens
+ │      │              └─ 累計輸入 tokens / 壓縮門檻
+ │      └─ ReAct loop 第幾輪 / 最大輪數
+ └─ ◉ busy / ○ idle
+```
+
 ### 工廠函式
 
 ```python
@@ -456,7 +663,12 @@ pip install anthropic
 | 7 | create_agent() 工廠 + 整合測試 | DONE | 5 (真實 API) | `6e32052` |
 | 8 | E2E Playwright 瀏覽器測試 | DONE | 5 (真實 API + Chromium) | `62454ca` |
 | 9 | 收尾 — 全部 68 測試通過 | DONE | 68 total | — |
-| 10 | 認知加權摘要 — salience + dimensions | DONE | 8 (3 真實 API) | — |
+| 10 | 認知加權摘要 — salience + dimensions | DONE | 8 (3 真實 API) | `d8dbfc9` |
+| 11 | CLI TUI 介面 (Textual) | DONE | 41 | — |
+| 12 | System Tools (read/write/grep/search/bash/web_search) | DONE | 32 | — |
+| 13 | Hook Manager (PreToolUse/PostToolUse/Stop) | DONE | 22 | — |
+| 14 | MCP Client (JSON-RPC over stdio) | DONE | 16 | — |
+| 15 | Skill Loader (SKILL.md frontmatter) | DONE | 14 | — |
 
 ### Spec 測試覆蓋對照
 

@@ -223,7 +223,6 @@ class ReActAgent:
         self._manager.dispatch_on_agent_start(ctx)
         tools = self._manager.get_all_tool_definitions()
         final_answer = self._react_loop(ctx, tools)
-        final_answer = self._manager.dispatch_on_agent_end(ctx, final_answer)
         return final_answer
 
     def _react_loop(self, ctx: AgentContext, tools: list[dict]) -> str:
@@ -274,7 +273,13 @@ class ReActAgent:
 
             # If no tool calls and stop_reason is end_turn, we're done
             if not tool_uses and response.stop_reason == "end_turn":
-                return final_text
+                final_answer = self._manager.dispatch_on_agent_end(ctx, final_text)
+                # Stop hook can force continuation
+                if isinstance(final_answer, dict) and final_answer.get("continue"):
+                    msg = final_answer.get("message", "Please continue.")
+                    ctx.messages.append({"role": "user", "content": msg})
+                    continue
+                return final_answer if isinstance(final_answer, str) else final_text
 
             # Execute tool calls
             if tool_uses:
@@ -283,12 +288,15 @@ class ReActAgent:
                     tc = {"name": tool_use.name, "input": tool_use.input, "id": tool_use.id}
                     tc = self._manager.dispatch_before_action(ctx, tc)
 
-                    try:
-                        result = self._manager.route_tool_call(tc["name"], tc["input"])
-                        result = self._manager.dispatch_after_action(ctx, tc, result)
-                    except Exception as e:
-                        error_msg = self._manager.dispatch_on_error(ctx, e)
-                        result = error_msg or f"Error: {e}"
+                    if tc.get("_blocked"):
+                        result = tc["_blocked"]
+                    else:
+                        try:
+                            result = self._manager.route_tool_call(tc["name"], tc["input"])
+                            result = self._manager.dispatch_after_action(ctx, tc, result)
+                        except Exception as e:
+                            error_msg = self._manager.dispatch_on_error(ctx, e)
+                            result = error_msg or f"Error: {e}"
 
                     result_str = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
                     observation = self._manager.dispatch_on_observation(ctx, result_str)
@@ -308,4 +316,6 @@ class ReActAgent:
                 ctx.messages.append({"role": "user", "content": tool_results})
 
         # Max iterations reached
-        return final_text or "I've reached the maximum number of iterations without a final answer."
+        fallback = final_text or "I've reached the maximum number of iterations without a final answer."
+        result = self._manager.dispatch_on_agent_end(ctx, fallback)
+        return result if isinstance(result, str) else fallback
