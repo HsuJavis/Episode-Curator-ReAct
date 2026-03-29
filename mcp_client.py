@@ -197,6 +197,7 @@ class MCPPlugin(SkillPlugin):
     def is_deferred(self) -> bool:
         return True
 
+
     def get_tools(self) -> list[dict]:
         return list(self._tools)
 
