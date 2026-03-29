@@ -3,7 +3,8 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["react_agent", "episode_curator", "web_app"]
+py-modules = ["react_agent", "episode_curator", "web_app", "cli_app",
+              "system_tools", "hook_manager", "mcp_client", "skill_loader"]
 
 [project]
 name = "episode-curator-react"
@@ -15,6 +16,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+tui = [
+    "textual>=0.50",
+]
 dev = [
     "pytest",
     "pytest-playwright",
@@ -26,4 +30,6 @@ testpaths = ["tests"]
 markers = [
     "llm: tests that require real Anthropic API calls",
     "e2e: end-to-end Playwright browser tests",
+    "tui: TUI (Textual) CLI interface tests",
 ]
+asyncio_mode = "auto"
