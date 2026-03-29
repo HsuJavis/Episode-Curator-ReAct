@@ -178,6 +178,52 @@ class TestMessagesFormatAfterCompression:
                         assert prev["role"] == "assistant"
 
 
+class TestSalienceInPlugin:
+    """Spec Tests 11/12: salience + dimensions in plugin flow."""
+
+    @pytest.mark.llm
+    def test_compression_stores_salience(self, api_key, tmp_storage):
+        """After compression, saved episodes should have salience and dimensions."""
+        store = EpisodeStore(tmp_storage)
+        curator = Curator(api_key=api_key)
+        plugin = EpisodeCuratorPlugin(store, curator, threshold=100, preserve_recent=2)
+
+        ctx = AgentContext(user_query="test")
+        ctx.messages = [
+            {"role": "user", "content": "我原本用 Redis 做快取，但延遲太高"},
+            {"role": "assistant", "content": "Redis 延遲高可能是網路問題或序列化問題"},
+            {"role": "user", "content": "後來發現是序列化用了 pickle，改用 msgpack 就快了"},
+            {"role": "assistant", "content": "msgpack 比 pickle 快很多，這是個好發現"},
+            {"role": "user", "content": "決定以後都用 msgpack"},
+            {"role": "assistant", "content": "好的選擇"},
+        ]
+
+        plugin.on_token_usage(ctx, input_tokens=200, output_tokens=50)
+
+        assert len(store._index) > 0
+        for ep_id, entry in store._index.items():
+            assert "salience" in entry, f"Episode {ep_id} missing salience"
+            assert isinstance(entry["salience"], (int, float))
+            assert "dimensions" in entry, f"Episode {ep_id} missing dimensions"
+
+    def test_recall_shows_salience(self, tmp_storage):
+        """Recall output should include salience in header."""
+        store = EpisodeStore(tmp_storage)
+        dims = {"decisions": ["chose X"], "corrections": [], "insights": [],
+                "pending": [], "user_intent": "testing", "outcome": "positive"}
+        store.save_episode("001", [{"role": "user", "content": "q"}],
+                          "Test", "Test summary", ["test"],
+                          salience=0.8, dimensions=dims)
+
+        curator = Curator.__new__(Curator)
+        plugin = EpisodeCuratorPlugin(store, curator)
+        result = plugin.execute_tool("recall_episode", {"episode_id": "001"})
+
+        assert "salience: 0.8" in result
+        assert "decisions: chose X" in result
+        assert "user_intent: testing" in result
+
+
 class TestOnAgentStart:
     def test_injects_facts_and_index(self, tmp_storage):
         store = EpisodeStore(tmp_storage)

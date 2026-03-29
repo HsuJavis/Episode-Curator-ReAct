@@ -62,6 +62,8 @@ class EpisodeStore:
         summary: str,
         tags: list[str],
         continues_episode: str | None = None,
+        salience: float = 0.5,
+        dimensions: dict | None = None,
     ) -> None:
         """Save an episode (immutable — refuses to overwrite)."""
         ep_path = self._episodes_dir / f"{episode_id}.json"
@@ -75,6 +77,8 @@ class EpisodeStore:
             "summary": summary,
             "tags": tags,
             "created_at": datetime.now().isoformat(),
+            "salience": salience,
+            "dimensions": dimensions or {},
         }
         self._save_json(ep_path, ep_data)
 
@@ -85,6 +89,8 @@ class EpisodeStore:
             "tags": tags,
             "message_count": len(messages),
             "created_at": ep_data["created_at"],
+            "salience": salience,
+            "dimensions": dimensions or {},
         }
         if continues_episode:
             index_entry["continues_episode"] = continues_episode
@@ -126,6 +132,9 @@ class EpisodeStore:
                 score += 1
 
             if score > 0:
+                # Apply salience as a multiplier: range [0.5*score .. 1.5*score]
+                ep_salience = entry.get("salience", 0.5)
+                score = score * (0.5 + ep_salience)
                 results.append({"id": ep_id, "score": score, **entry})
 
         results.sort(key=lambda x: x["score"], reverse=True)
@@ -169,7 +178,7 @@ class EpisodeStore:
 
         lines = []
 
-        # Recent: individual lines grouped by tag
+        # Recent: individual lines grouped by tag, sorted by salience descending
         if recent:
             tag_groups: dict[str, list] = {}
             for ep_id, entry in recent:
@@ -177,7 +186,13 @@ class EpisodeStore:
                     tag_groups.setdefault(tag, []).append((ep_id, entry))
             for tag in sorted(tag_groups.keys()):
                 lines.append(f"## [{tag}]")
-                for ep_id, entry in tag_groups[tag]:
+                # Sort by salience descending within each tag group
+                sorted_eps = sorted(
+                    tag_groups[tag],
+                    key=lambda x: x[1].get("salience", 0.5),
+                    reverse=True,
+                )
+                for ep_id, entry in sorted_eps:
                     rel_time = self.format_time(entry["created_at"])
                     lines.append(f"  #{ep_id} ({rel_time}) — {entry['summary']}")
 
@@ -383,7 +398,7 @@ class EpisodeStore:
 class Curator:
     """Second LLM that segments messages by topic."""
 
-    SYSTEM_PROMPT = """你是一個對話整理助手。你的工作是將一段對話訊息按主題分段。
+    SYSTEM_PROMPT = """你是一個對話整理助手。你的工作是將一段對話訊息按主題分段，並評估每段的認知權重。
 
 規則：
 1. 按主題分段，同一主題的訊息即使不相鄰也歸為一段
@@ -392,6 +407,19 @@ class Curator:
 4. continues_episode 是可選欄位，填入被延續的 episode ID
 5. 如果是全新主題，不填 continues_episode
 6. 提取重要的永久事實（使用者偏好、技術棧等）
+7. 為每個 segment 評估 salience 分數（0.0~1.0），代表認知權重：
+   - 0.0-0.3: 普通資訊交換、確認型回覆
+   - 0.4-0.6: 一般決策或中等複雜度討論
+   - 0.7-0.9: 錯誤修正、重要決策、方向轉變
+   - 1.0: 關鍵突破、重大架構決策、嚴重 bug 修復
+   評分依據：包含錯誤修正 +0.3、重要決策 +0.2、方向轉變 +0.2、正向確認 +0.1、基線 0.3
+8. 填寫 dimensions 物件，捕捉多維度認知摘要：
+   - decisions: 做了什麼決定+為什麼（列表，可為空）
+   - corrections: 錯誤修正過程（列表，可為空）
+   - insights: 洞察/發現（列表，可為空）
+   - pending: 還剩什麼沒做（列表，可為空）
+   - user_intent: 使用者到底想要什麼（字串，必填）
+   - outcome: "positive" / "negative" / "neutral"（必填）
 
 你必須回傳 JSON（不要包含 markdown code fence）：
 {
@@ -401,7 +429,16 @@ class Curator:
       "summary": "一句話摘要（如是延續，開頭加「接續 #xxx：」）",
       "tags": ["tag1"],
       "message_indices": [0, 1, 2],
-      "continues_episode": "001"
+      "continues_episode": "001",
+      "salience": 0.7,
+      "dimensions": {
+        "decisions": ["決定 X 因為 Y"],
+        "corrections": ["原本用 A 失敗，改用 B"],
+        "insights": ["發現 Z 的性價比最高"],
+        "pending": ["尚未處理 error handling"],
+        "user_intent": "使用者想建立高效的 CI pipeline",
+        "outcome": "positive"
+      }
     }
   ],
   "facts": ["事實1", "事實2"]
@@ -484,7 +521,7 @@ class Curator:
         self._refresh_client_if_needed()
         response = self._client.messages.create(
             model=self._model,
-            max_tokens=800,
+            max_tokens=1200,
             system=self.SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_content}],
         )
@@ -504,6 +541,11 @@ class Curator:
                     "summary": "混合主題對話",
                     "tags": ["misc"],
                     "message_indices": list(range(len(messages))),
+                    "salience": 0.5,
+                    "dimensions": {
+                        "decisions": [], "corrections": [], "insights": [],
+                        "pending": [], "user_intent": "未知", "outcome": "neutral",
+                    },
                 }],
                 "facts": [],
             }
@@ -513,6 +555,16 @@ class Curator:
             result["segments"] = []
         if "facts" not in result:
             result["facts"] = []
+
+        # Ensure salience/dimensions defaults for each segment
+        for seg in result["segments"]:
+            if "salience" not in seg:
+                seg["salience"] = 0.5
+            else:
+                # Clamp to [0.0, 1.0]
+                seg["salience"] = max(0.0, min(1.0, float(seg["salience"])))
+            if "dimensions" not in seg:
+                seg["dimensions"] = {}
 
         return result
 
@@ -622,7 +674,22 @@ class EpisodeCuratorPlugin(SkillPlugin):
         return "Please provide either episode_id or search_query."
 
     def _format_episode_output(self, ep: dict) -> str:
-        header = f"── Episode #{ep['id']}: {ep['title']} | {ep.get('created_at', '')} ──"
+        salience = ep.get("salience", "—")
+        header = f"── Episode #{ep['id']}: {ep['title']} | {ep.get('created_at', '')} | salience: {salience} ──"
+
+        # Show dimensions if present
+        dims = ep.get("dimensions", {})
+        dim_lines = []
+        if dims:
+            for key in ("decisions", "corrections", "insights", "pending"):
+                items = dims.get(key, [])
+                if items:
+                    dim_lines.append(f"  {key}: {'; '.join(items)}")
+            if dims.get("user_intent"):
+                dim_lines.append(f"  user_intent: {dims['user_intent']}")
+            if dims.get("outcome"):
+                dim_lines.append(f"  outcome: {dims['outcome']}")
+
         msgs = []
         for msg in ep.get("messages", []):
             role = msg.get("role", "?")
@@ -636,7 +703,13 @@ class EpisodeCuratorPlugin(SkillPlugin):
                         parts.append(str(block))
                 content = " ".join(parts)
             msgs.append(f"[{role}] {content}")
-        return header + "\n" + "\n".join(msgs)
+
+        parts = [header]
+        if dim_lines:
+            parts.append("[dimensions]")
+            parts.extend(dim_lines)
+        parts.extend(msgs)
+        return "\n".join(parts)
 
     # --- Hooks ---
 
@@ -693,6 +766,8 @@ class EpisodeCuratorPlugin(SkillPlugin):
                 summary=segment.get("summary", ""),
                 tags=segment.get("tags", ["misc"]),
                 continues_episode=segment.get("continues_episode"),
+                salience=segment.get("salience", 0.5),
+                dimensions=segment.get("dimensions"),
             )
 
         # Save facts
