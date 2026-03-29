@@ -97,6 +97,9 @@ class SystemToolsPlugin(SkillPlugin):
     def name(self) -> str:
         return "system_tools"
 
+    def is_deferred(self) -> bool:
+        return True
+
     def get_tools(self) -> list[dict]:
         return list(self.TOOLS)
 

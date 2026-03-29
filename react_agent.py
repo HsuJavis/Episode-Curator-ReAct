@@ -37,6 +37,10 @@ class SkillPlugin(ABC):
     def get_tools(self) -> list[dict]:
         return []
 
+    def is_deferred(self) -> bool:
+        """If True, tools start unloaded — only metadata in catalog until load_tools."""
+        return False
+
     def execute_tool(self, name: str, tool_input: dict) -> Any:
         raise NotImplementedError(f"Tool {name} not implemented")
 
@@ -71,8 +75,12 @@ class SkillPluginManager:
     def __init__(self):
         self._plugins: list[SkillPlugin] = []
         self._tool_map: dict[str, SkillPlugin] = {}
+        self._all_tool_defs: dict[str, dict] = {}  # name -> definition
+        self._active_tools: set[str] = set()  # currently loaded tool names
+        self._deferred_tools: set[str] = set()  # tools from deferred plugins
 
     def register(self, plugin: SkillPlugin) -> None:
+        deferred = plugin.is_deferred()
         for tool_def in plugin.get_tools():
             tool_name = tool_def["name"]
             if tool_name in self._tool_map:
@@ -81,13 +89,67 @@ class SkillPluginManager:
                     f"Tool name conflict: '{tool_name}' already registered by plugin '{existing}'"
                 )
             self._tool_map[tool_name] = plugin
+            self._all_tool_defs[tool_name] = tool_def
+            if deferred:
+                self._deferred_tools.add(tool_name)
+            else:
+                self._active_tools.add(tool_name)
         self._plugins.append(plugin)
 
     def get_all_tool_definitions(self) -> list[dict]:
+        """Return all tool definitions (backward compat)."""
         tools = []
         for plugin in self._plugins:
             tools.extend(plugin.get_tools())
         return tools
+
+    def get_active_tool_definitions(self) -> list[dict]:
+        """Return only currently active (loaded) tool definitions."""
+        return [self._all_tool_defs[name] for name in self._active_tools
+                if name in self._all_tool_defs]
+
+    def load_tools(self, names: list[str]) -> str:
+        """Load deferred tools into the active set (open book)."""
+        loaded = []
+        errors = []
+        for name in names:
+            if name not in self._all_tool_defs:
+                errors.append(f"Unknown tool: '{name}'")
+            elif name in self._active_tools:
+                loaded.append(name)  # idempotent
+            else:
+                self._active_tools.add(name)
+                loaded.append(name)
+        if errors:
+            return f"Error: {'; '.join(errors)}"
+        return f"Loaded tools: {', '.join(loaded)}"
+
+    def unload_tools(self, names: list[str]) -> str:
+        """Unload tools from the active set, keeping metadata (close book)."""
+        unloaded = []
+        errors = []
+        for name in names:
+            if name not in self._all_tool_defs:
+                errors.append(f"Unknown tool: '{name}'")
+            elif name not in self._deferred_tools:
+                errors.append(f"Cannot unload non-deferred tool: '{name}'")
+            else:
+                self._active_tools.discard(name)
+                unloaded.append(name)
+        if errors:
+            return f"Error: {'; '.join(errors)}"
+        return f"Unloaded tools: {', '.join(unloaded)}"
+
+    def get_tool_catalog(self) -> list[dict]:
+        """Return metadata for all tools (name, description, loaded status)."""
+        catalog = []
+        for name, tool_def in self._all_tool_defs.items():
+            catalog.append({
+                "name": name,
+                "description": tool_def.get("description", ""),
+                "loaded": name in self._active_tools,
+            })
+        return catalog
 
     def route_tool_call(self, name: str, tool_input: dict) -> Any:
         plugin = self._tool_map.get(name)
@@ -221,13 +283,15 @@ class ReActAgent:
         )
         ctx.messages.append({"role": "user", "content": user_query})
         self._manager.dispatch_on_agent_start(ctx)
-        tools = self._manager.get_all_tool_definitions()
-        final_answer = self._react_loop(ctx, tools)
+        final_answer = self._react_loop(ctx)
         return final_answer
 
-    def _react_loop(self, ctx: AgentContext, tools: list[dict]) -> str:
+    def _react_loop(self, ctx: AgentContext) -> str:
         while ctx.iteration < self.max_iterations:
             ctx.iteration += 1
+
+            # Refresh active tool definitions each iteration (dynamic loading)
+            tools = self._manager.get_active_tool_definitions()
 
             # Build system prompt with plugin extras
             system = self.system_prompt

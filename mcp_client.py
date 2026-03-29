@@ -194,6 +194,9 @@ class MCPPlugin(SkillPlugin):
     def name(self) -> str:
         return "mcp"
 
+    def is_deferred(self) -> bool:
+        return True
+
     def get_tools(self) -> list[dict]:
         return list(self._tools)
 
