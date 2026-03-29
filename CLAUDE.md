@@ -14,6 +14,7 @@
 react_agent.py          ← 基礎 ReAct Agent + SkillPlugin Hook 系統
 episode_curator.py      ← Episode Curator 插件，解決 context window 問題
 system_tools.py         ← System Tools 插件 (read/write/grep/search/bash/web_search)
+tool_registry.py        ← 動態工具載入插件 (load_tools/unload_tools, Open/Close Book)
 hook_manager.py         ← Hook Manager 插件 (PreToolUse/PostToolUse/Stop)
 mcp_client.py           ← MCP Client 插件 (JSON-RPC over stdio)
 skill_loader.py         ← Skill Loader 插件 (SKILL.md frontmatter)
@@ -432,7 +433,43 @@ if isinstance(final_answer, dict) and final_answer.get("continue"):
 - `get_tools()` 回傳所有 server 的工具定義（已轉換格式、已加前綴）
 - `execute_tool()` 從工具名稱解析 server，呼叫 `manager.call_tool()`
 
-## 檔案 6: skill_loader.py
+## 檔案 6: tool_registry.py
+
+### ToolRegistryPlugin
+
+動態工具載入插件（Open/Close Book）。讓 Worker LLM 按需載入工具 schema，不需要的工具只保留 metadata。
+
+**核心概念**：
+- **Deferred tools**：`is_deferred() → True` 的插件，工具定義不會自動載入
+- **Tool catalog**：所有工具的 name + description，永遠在 system prompt
+- **Active tools**：已載入的工具 schema，會傳給 Anthropic API
+
+**SkillPlugin 新增方法**：
+```python
+def is_deferred(self) -> bool:
+    """如果 True，工具啟動時不載入 schema，只保留 metadata。"""
+    return False  # 預設不延遲
+```
+
+**SkillPluginManager 新增方法**：
+- `get_active_tool_definitions()`: 只回傳已載入的工具定義
+- `load_tools(names)`: 載入工具 schema（Open Book）
+- `unload_tools(names)`: 卸載工具 schema，保留 metadata（Close Book）
+- `get_tool_catalog()`: 回傳所有工具的 `{name, description, loaded}` 列表
+
+**ToolRegistryPlugin 提供 2 個工具**：
+| 工具 | 功能 |
+|------|------|
+| `load_tools` | 載入指定工具的 schema，使其可用 |
+| `unload_tools` | 卸載工具 schema，釋放 context 空間 |
+
+**on_agent_start**：將 deferred 工具目錄注入 `system_prompt_extra`。
+
+**_react_loop 變更**：每次迭代呼叫 `get_active_tool_definitions()` 而非靜態 tools 列表，支援動態載入。
+
+**Deferred 插件**：SystemToolsPlugin 和 MCPPlugin 的 `is_deferred()` 回傳 True。
+
+## 檔案 7（原 6）: skill_loader.py
 
 ### SkillManager
 
@@ -648,6 +685,11 @@ pip install anthropic
 10. **時間衰減索引**：build_global_index 對 48h 內逐條顯示、2 週內按天匯總、更早按週匯總。日/週 digest 只為已過去的時段生成且 immutable
 11. **認知加權摘要**：Curator 能產出 salience 分數和 6 維度 dimensions，存入 index 且 recall 時可見
 12. **Salience 排序**：build_global_index 同一時間層內高 salience episode 排前面，search_episodes 結果受 salience 加權
+13. **動態工具載入/卸載**：is_deferred、load_tools/unload_tools、get_tool_catalog、deferred 工具不在 active set
+14. **Tool/Skill 載入 TUI E2E**：deferred 工具在 TUI 中正確載入/卸載，skill catalog 與 tool catalog 共存，agent 能先 load_tools 再使用
+15. **長對話記憶 recall rate**：seed 5 個 episode 後，search recall rate ≥ 80%，LLM 能正確 recall ≥ 2/3 主題
+16. **MCP + Skill 相容性**：MCP 工具 deferred、load/unload/execute 正常、與 system tools 無衝突、skill catalog 在 load/unload cycle 後穩定
+17. **Session restart recall rate**：episodes/facts 跨 session 持久化，新 session 搜尋 recall ≥ 67%，新 agent 注入舊 context，LLM 跨 session recall ≥ 2/3
 
 ## Progress
 
@@ -669,6 +711,8 @@ pip install anthropic
 | 13 | Hook Manager (PreToolUse/PostToolUse/Stop) | DONE | 22 | — |
 | 14 | MCP Client (JSON-RPC over stdio) | DONE | 16 | — |
 | 15 | Skill Loader (SKILL.md frontmatter) | DONE | 14 | — |
+| 16 | Dynamic Tool Loading (Open/Close Book) | DONE | 29 | `0f2750c` |
+| 17 | TUI E2E — tool/skill loading + memory recall + MCP compat + session restart | DONE | 25 (5 真實 API) | — |
 
 ### Spec 測試覆蓋對照
 
@@ -686,4 +730,9 @@ pip install anthropic
 | 10 | 時間衰減索引 | `test_temporal_decay.py` | PASS |
 | 11 | 認知加權摘要 | `test_curator.py` + `test_plugin.py` | PASS |
 | 12 | Salience 排序 | `test_episode_store.py` + `test_plugin.py` | PASS |
+| 13 | 動態工具載入/卸載 | `test_tool_registry.py` | PASS |
+| 14 | Tool/Skill 載入 TUI E2E | `test_tui_e2e.py::TestToolDynamicLoadingTUI` | PASS |
+| 15 | 長對話記憶 recall rate | `test_tui_e2e.py::TestLongConversationRecall` | PASS |
+| 16 | MCP + Skill 相容性 | `test_tui_e2e.py::TestMCPAndSkillCompatibility` | PASS |
+| 17 | Session restart recall rate | `test_tui_e2e.py::TestSessionRestartRecall` | PASS |
 
