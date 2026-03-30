@@ -198,24 +198,21 @@ class TestInputHistory:
 # ============================================================
 
 class TestCopyConversation:
-    """User should be able to copy conversation content."""
+    """User should be able to select and copy conversation content."""
 
     @pytest.fixture
     def app(self):
         return EpisodeCuratorApp()
 
     @pytest.mark.asyncio
-    async def test_copy_binding_exists(self, app):
-        """Ctrl+Y binding for copy should exist."""
+    async def test_select_mode_binding_exists(self, app):
+        """Ctrl+S binding for select mode should exist."""
         async with app.run_test(size=(120, 40)) as pilot:
-            bindings = [b for b in app.BINDINGS if "copy" in b.action.lower() or b.key == "ctrl+y"]
-            assert len(bindings) >= 1, "Should have a copy keybinding"
+            bindings = [b for b in app.BINDINGS if "select" in b.action.lower()]
+            assert len(bindings) >= 1, "Should have a select mode keybinding"
 
     @pytest.mark.asyncio
-    async def test_copy_last_answer(self, app):
-        """Ctrl+Y should copy the last assistant answer to clipboard."""
+    async def test_select_mode_action_exists(self, app):
+        """action_toggle_select_mode should exist."""
         async with app.run_test(size=(120, 40)) as pilot:
-            # Simulate an answer
-            app._last_answer = "This is the answer"
-            # The action should exist
-            assert hasattr(app, "action_copy_last")
+            assert hasattr(app, "action_toggle_select_mode")

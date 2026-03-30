@@ -15,7 +15,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.widget import Widget
-from textual.widgets import Footer, Input, RichLog, Static
+from textual.widgets import Footer, Input, RichLog, Static, TextArea
 
 from react_agent import AgentContext, SkillPlugin
 
@@ -381,6 +381,16 @@ class EpisodeCuratorApp(App):
         scrollbar-size: 1 1;
     }
 
+    #select-area {
+        display: none;
+        background: #0d1b2a;
+        color: #c8d6e5;
+    }
+
+    #select-area.select-visible {
+        display: block;
+    }
+
     #stream-output {
         height: auto;
         max-height: 8;
@@ -470,12 +480,13 @@ class EpisodeCuratorApp(App):
     """
 
     BINDINGS = [
-        Binding("ctrl+c", "quit", "Quit", show=True, priority=True),
+        Binding("ctrl+q", "quit", "Quit", show=True, priority=True),
         Binding("ctrl+l", "clear_log", "Clear", show=True),
         Binding("ctrl+d", "toggle_detail_system", "Sys", show=True),
         Binding("ctrl+t", "toggle_detail_tools", "Tools", show=True),
         Binding("ctrl+b", "toggle_detail_msgs", "Msgs", show=True),
-        Binding("ctrl+y", "copy_last", "Copy", show=True),
+        Binding("ctrl+s", "toggle_select_mode", "Select", show=True),
+        Binding("escape", "exit_select_mode", "", show=False),
         Binding("up", "history_up", "", show=False, priority=True),
         Binding("down", "history_down", "", show=False, priority=True),
     ]
@@ -494,12 +505,15 @@ class EpisodeCuratorApp(App):
         self._input_history: list[str] = []   # command history (max 5)
         self._history_index: int = -1         # -1 = not browsing
         self._last_answer: str = ""           # last assistant answer for copy
+        self._plain_log: list[str] = []       # plain text conversation log
+        self._select_mode: bool = False       # selection mode active
 
     def compose(self) -> ComposeResult:
         with Vertical(id="root-layout"):
             yield Horizontal(
                 Vertical(
                     RichLog(highlight=True, markup=True, wrap=True, id="log"),
+                    TextArea("", read_only=True, id="select-area"),
                     Static("", id="stream-output"),
                     id="conversation",
                 ),
@@ -551,6 +565,7 @@ class EpisodeCuratorApp(App):
         event.input.value = ""
         log = self.query_one("#log", RichLog)
         log.write(f"\n[bold #a8d8ea]▎ user[/]  {message}")
+        self._plain_log.append(f"user: {message}")
 
         status = self.query_one("#status-bar", StatusBar)
         status.busy = True
@@ -651,6 +666,7 @@ class EpisodeCuratorApp(App):
         elif kind == "answer":
             text = data.get("text", "")
             self._last_answer = text
+            self._plain_log.append(f"assistant: {text}")
             log.write(f"\n[bold #e0e8f0]▎ assistant[/]  {text}\n")
             status = self.query_one("#status-bar", StatusBar)
             status.busy = False
@@ -794,28 +810,28 @@ class EpisodeCuratorApp(App):
             self._history_index = -1
             inp.value = ""
 
-    def action_copy_last(self):
-        """Copy the last assistant answer to clipboard."""
-        if self._last_answer:
-            import pyperclip
-            try:
-                pyperclip.copy(self._last_answer)
-                log = self.query_one("#log", RichLog)
-                log.write("[dim]  ✂ Copied last answer to clipboard.[/]")
-            except Exception:
-                # pyperclip not installed or clipboard unavailable — use Textual fallback
-                try:
-                    import subprocess
-                    proc = subprocess.Popen(
-                        ["pbcopy"] if __import__("sys").platform == "darwin" else ["xclip", "-selection", "clipboard"],
-                        stdin=subprocess.PIPE,
-                    )
-                    proc.communicate(self._last_answer.encode("utf-8"))
-                    log = self.query_one("#log", RichLog)
-                    log.write("[dim]  ✂ Copied last answer to clipboard.[/]")
-                except Exception:
-                    log = self.query_one("#log", RichLog)
-                    log.write("[dim yellow]  ✂ Copy failed — clipboard not available.[/]")
+    def action_toggle_select_mode(self):
+        """Toggle selection mode — shows a read-only TextArea for mouse select + Ctrl+C copy."""
+        area = self.query_one("#select-area", TextArea)
+        log = self.query_one("#log", RichLog)
+        if self._select_mode:
+            # Exit selection mode
+            area.remove_class("select-visible")
+            log.display = True
+            self._select_mode = False
+            self.query_one("#user-input", Input).focus()
+        else:
+            # Enter selection mode — load plain log into TextArea
+            area.load_text("\n\n".join(self._plain_log))
+            area.add_class("select-visible")
+            log.display = False
+            self._select_mode = True
+            area.focus()
+
+    def action_exit_select_mode(self):
+        """Exit selection mode on Esc."""
+        if self._select_mode:
+            self.action_toggle_select_mode()
 
     def action_quit(self):
         self.exit()
