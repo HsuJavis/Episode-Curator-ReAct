@@ -89,9 +89,32 @@ class TUIPlugin(SkillPlugin):
         system_content = base_prompt
         if extra:
             system_content = f"{base_prompt}\n\n── system_prompt_extra ──\n{extra}" if base_prompt else extra
+        def _msg_preview(m: dict) -> dict:
+            role = m.get("role", "?")
+            content = m.get("content", "")
+            if isinstance(content, str):
+                return {"role": role, "content": content[:200]}
+            if isinstance(content, list):
+                parts = []
+                for b in content:
+                    if isinstance(b, dict):
+                        t = b.get("type", "?")
+                        if t == "tool_result":
+                            parts.append(f"[tool_result:{b.get('tool_use_id','')}]")
+                        else:
+                            parts.append(f"[{t}]")
+                    elif hasattr(b, "type"):
+                        if b.type == "text":
+                            parts.append(getattr(b, "text", "")[:100])
+                        elif b.type == "tool_use":
+                            parts.append(f"[tool_use:{getattr(b, 'name', '?')}]")
+                        else:
+                            parts.append(f"[{b.type}]")
+                return {"role": role, "content": " | ".join(parts)[:200]}
+            return {"role": role, "content": str(content)[:200]}
+
         msgs_content = json.dumps(
-            [{"role": m.get("role", "?"), "content": str(m.get("content", ""))[:200]}
-             for m in ctx.messages[-10:]],  # last 10 messages, truncated
+            [_msg_preview(m) for m in ctx.messages[-10:]],
             ensure_ascii=False, indent=1,
         ) if ctx.messages else "[]"
         self._emit("context_content",
@@ -193,12 +216,13 @@ class ContextDetailPanel(VerticalScroll):
     """Expandable panel showing full context content for each category."""
 
     def update_detail(self, category: str, content: str):
+        from rich.markup import escape
         self.remove_children()
         header = f" [bold #5dade2]{category.upper()}[/] context detail"
-        lines = content[:2000]  # cap display
+        safe = escape(content[:2000])
         if len(content) > 2000:
-            lines += f"\n... ({len(content)} chars total)"
-        self.mount(Static(f"{header}\n[dim]{lines}[/]", classes="context-detail-content"))
+            safe += f"\n... ({len(content)} chars total)"
+        self.mount(Static(f"{header}\n[dim]{safe}[/]", classes="context-detail-content"))
 
 
 class EpisodeSummaryPanel(VerticalScroll):
