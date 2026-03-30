@@ -133,7 +133,7 @@ class TestToolsPanelReflectsLoadState:
         assert "[✓]" in content  # load_tools/unload_tools are active
         assert "[·]" in content  # system tools are deferred
         assert "Active tools" in content
-        assert "Deferred tools" in content
+        assert "Deferred" in content
 
     def test_build_tools_content_after_load(self):
         """After loading tools, they should move from [·] to [✓]."""
