@@ -85,8 +85,12 @@ class TUIPlugin(SkillPlugin):
         self._emit("stream_delta", text=delta)
 
     def on_token_usage(self, ctx: AgentContext, input_tokens: int, output_tokens: int) -> None:
-        # Emit raw context content for detail panel
-        system_content = ctx.metadata.get("system_prompt_extra", "")
+        # Emit raw context content for detail panel — include base system prompt
+        base_prompt = ctx.metadata.get("_base_system_prompt", "")
+        extra = ctx.metadata.get("system_prompt_extra", "")
+        system_content = base_prompt
+        if extra:
+            system_content = f"{base_prompt}\n\n── system_prompt_extra ──\n{extra}" if base_prompt else extra
         msgs_content = json.dumps(
             [{"role": m.get("role", "?"), "content": str(m.get("content", ""))[:200]}
              for m in ctx.messages[-10:]],  # last 10 messages, truncated
@@ -399,7 +403,7 @@ class EpisodeCuratorApp(App):
         Binding("ctrl+l", "clear_log", "Clear", show=True),
         Binding("ctrl+d", "toggle_detail_system", "Sys", show=True),
         Binding("ctrl+t", "toggle_detail_tools", "Tools", show=True),
-        Binding("ctrl+m", "toggle_detail_msgs", "Msgs", show=True),
+        Binding("ctrl+b", "toggle_detail_msgs", "Msgs", show=True),
     ]
 
     def __init__(self, agent=None, store=None, threshold: int = 80000, **kwargs):

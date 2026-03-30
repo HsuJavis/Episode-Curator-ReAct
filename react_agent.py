@@ -289,6 +289,7 @@ class ReActAgent:
             messages=list(conversation_history or []),
             start_time=time.time(),
         )
+        ctx.metadata["_base_system_prompt"] = self.system_prompt
         ctx.messages.append({"role": "user", "content": user_query})
         self._manager.dispatch_on_agent_start(ctx)
         final_answer = self._react_loop(ctx)
@@ -321,10 +322,22 @@ class ReActAgent:
                 api_params["tools"] = tools
 
             # Use streaming to emit text deltas in real time
-            with self._client.messages.stream(**api_params) as stream:
-                for delta in stream.text_stream:
-                    self._manager.dispatch_on_stream_delta(ctx, delta)
-                response = stream.get_final_message()
+            # Retry once on 401 (OAuth token may have expired mid-session)
+            try:
+                with self._client.messages.stream(**api_params) as stream:
+                    for delta in stream.text_stream:
+                        self._manager.dispatch_on_stream_delta(ctx, delta)
+                    response = stream.get_final_message()
+            except anthropic.AuthenticationError:
+                # Force re-read OAuth token regardless of _uses_oauth flag
+                token = _read_oauth_token()
+                if token:
+                    self._client = anthropic.Anthropic(api_key=token)
+                    self._uses_oauth = True
+                with self._client.messages.stream(**api_params) as stream:
+                    for delta in stream.text_stream:
+                        self._manager.dispatch_on_stream_delta(ctx, delta)
+                    response = stream.get_final_message()
 
             # Track token usage
             input_tokens = response.usage.input_tokens

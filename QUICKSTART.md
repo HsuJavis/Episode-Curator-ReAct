@@ -96,7 +96,17 @@ uv run python cli_app.py
 
 # 自訂 episode 存放位置
 EPISODE_STORE_DIR=./my_episodes uv run python cli_app.py
+
+# 自訂模型（預設 haiku，省錢）
+WORKER_MODEL=claude-sonnet-4-20250514 uv run python cli_app.py
 ```
+
+**TUI 快捷鍵**：
+- `Ctrl+D` — 展開/收合 System prompt 詳情
+- `Ctrl+T` — 展開/收合 Tools 清單
+- `Ctrl+B` — 展開/收合 Messages 內容
+- `Ctrl+L` — 清除對話 log
+- `Ctrl+C` — 退出
 
 ### 5. 跑測試
 
