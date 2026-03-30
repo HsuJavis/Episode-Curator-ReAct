@@ -477,6 +477,15 @@ def is_deferred(self) -> bool:
 
 觸發時機：`after_action` hook 偵測到 `unload_tools` 完成後自動執行。
 
+**Re-expand — 重新展開**：
+
+`load_tools` 時自動還原先前壓縮的 `tool_result` 內容：
+
+1. 壓縮時原始內容存入 `ctx.metadata["_compressed_results"][tool_use_id]`
+2. `load_tools` 的 `after_action` 掃描 messages，找到對應的壓縮 result
+3. 用存儲的原始內容還原 `block["content"]`，並從 store 中移除
+4. 若沒有先前壓縮記錄（從未 close 過），load 是 no-op
+
 **_react_loop 變更**：每次迭代呼叫 `get_active_tool_definitions()` 而非靜態 tools 列表，支援動態載入。
 
 **Deferred 插件**：SystemToolsPlugin 和 MCPPlugin 的 `is_deferred()` 回傳 True。
@@ -703,6 +712,7 @@ pip install anthropic
 16. **MCP + Skill 相容性**：MCP 工具 deferred、load/unload/execute 正常、與 system tools 無衝突、skill catalog 在 load/unload cycle 後穩定
 17. **Session restart recall rate**：episodes/facts 跨 session 持久化，新 session 搜尋 recall ≥ 67%，新 agent 注入舊 context，LLM 跨 session recall ≥ 2/3
 18. **Close-book context 壓縮**：unload_tools 壓縮 tool_result 內容，保留 metadata，不影響非目標工具，小 result 不壓縮
+19. **Re-expand 重新展開**：load_tools 還原先前壓縮的 tool_result，store 清理，close→re-open cycle 完整，LLM E2E 驗證
 
 ## Progress
 
@@ -724,8 +734,8 @@ pip install anthropic
 | 13 | Hook Manager (PreToolUse/PostToolUse/Stop) | DONE | 22 | — |
 | 14 | MCP Client (JSON-RPC over stdio) | DONE | 16 | — |
 | 15 | Skill Loader (SKILL.md frontmatter) | DONE | 14 | — |
-| 16 | Dynamic Tool Loading (Open/Close Book) | DONE | 36 | `0f2750c` |
-| 17 | TUI E2E — tool/skill loading + memory recall + MCP compat + session restart | DONE | 25 (5 真實 API) | — |
+| 16 | Dynamic Tool Loading (Open/Close Book + Re-expand) | DONE | 42 | `0f2750c` |
+| 17 | TUI E2E — tool/skill loading + memory recall + MCP compat + session restart | DONE | 26 (6 真實 API) | — |
 
 ### Spec 測試覆蓋對照
 
@@ -749,4 +759,5 @@ pip install anthropic
 | 16 | MCP + Skill 相容性 | `test_tui_e2e.py::TestMCPAndSkillCompatibility` | PASS |
 | 17 | Session restart recall rate | `test_tui_e2e.py::TestSessionRestartRecall` | PASS |
 | 18 | Close-book context 壓縮 | `test_tool_registry.py::TestCloseBookCompression` | PASS |
+| 19 | Re-expand 重新展開 | `test_tool_registry.py::TestReExpandOnLoad` + `test_tui_e2e.py` | PASS |
 

@@ -74,13 +74,15 @@ class ToolRegistryPlugin(SkillPlugin):
         raise ValueError(f"Unknown tool: {name}")
 
     def after_action(self, ctx: AgentContext, tool_call: dict, result: Any) -> Optional[Any]:
-        """Close-book: compress tool_result content when unload_tools is called."""
-        if tool_call.get("name") != "unload_tools":
+        """Close-book / re-open-book: compress or restore tool_result content."""
+        name = tool_call.get("name")
+        tool_names = set(tool_call.get("input", {}).get("names", []))
+        if not tool_names:
             return None
-        unloaded_names = set(tool_call.get("input", {}).get("names", []))
-        if not unloaded_names:
-            return None
-        self._compress_tool_history(ctx, unloaded_names)
+        if name == "unload_tools":
+            self._compress_tool_history(ctx, tool_names)
+        elif name == "load_tools":
+            self._expand_tool_history(ctx, tool_names)
         return None
 
     def _compress_tool_history(self, ctx: AgentContext, tool_names: set[str]) -> None:
@@ -119,12 +121,54 @@ class ToolRegistryPlugin(SkillPlugin):
                 original = block.get("content", "")
                 if not isinstance(original, str) or len(original) <= _COMPRESS_THRESHOLD:
                     continue
+                # Save original for re-expand
+                store = ctx.metadata.setdefault("_compressed_results", {})
+                store[tu_id] = original
                 # Compress: keep preview + metadata tag
                 preview = original[:100].rstrip()
                 block["content"] = (
                     f"[{tool_name} result compressed] {preview}... "
                     f"({len(original)} chars — use load_tools to re-expand)"
                 )
+
+    def _expand_tool_history(self, ctx: AgentContext, tool_names: set[str]) -> None:
+        """Restore previously compressed tool_result content (re-open book)."""
+        store: dict = ctx.metadata.get("_compressed_results", {})
+        if not store:
+            return
+
+        # Build id→name map
+        id_to_name: dict[str, str] = {}
+        for msg in ctx.messages:
+            if msg.get("role") != "assistant":
+                continue
+            content = msg.get("content", [])
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                block_type = getattr(block, "type", None) or (block.get("type") if isinstance(block, dict) else None)
+                if block_type == "tool_use":
+                    tu_id = getattr(block, "id", None) or (block.get("id") if isinstance(block, dict) else None)
+                    tu_name = getattr(block, "name", None) or (block.get("name") if isinstance(block, dict) else None)
+                    if tu_id and tu_name:
+                        id_to_name[tu_id] = tu_name
+
+        # Restore matching tool_result blocks
+        for msg in ctx.messages:
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content", [])
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                tu_id = block.get("tool_use_id", "")
+                tool_name = id_to_name.get(tu_id)
+                if tool_name not in tool_names:
+                    continue
+                if tu_id in store:
+                    block["content"] = store.pop(tu_id)
 
     def on_agent_start(self, ctx: AgentContext) -> None:
         """Inject deferred tool catalog into system prompt."""

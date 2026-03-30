@@ -163,6 +163,42 @@ class TestToolDynamicLoadingTUI:
         answer = agent.run(f"Read the file {test_file} and tell me the secret number.")
         assert "42" in answer
 
+    @pytest.mark.tui
+    @pytest.mark.llm
+    @pytest.mark.asyncio
+    async def test_close_and_reopen_book_e2e(self, api_key, tmp_path):
+        """Full E2E: agent loads tools, reads file, closes book, re-opens, recalls content."""
+        test_file = tmp_path / "data.txt"
+        test_file.write_text(
+            "Project codename: AURORA\nBudget: $2.5M\nDeadline: 2026-06-15\n" * 20,
+            encoding="utf-8",
+        )
+
+        agent = ReActAgent(
+            model="claude-haiku-4-5-20251001",
+            max_iterations=15,
+            api_key=api_key,
+            system_prompt=(
+                "You have deferred tools. Follow these steps exactly:\n"
+                "1. Use load_tools to activate 'read'\n"
+                "2. Use read to read the file\n"
+                "3. Use unload_tools to close 'read' (this compresses the result)\n"
+                "4. Use load_tools to re-open 'read' (this restores the result)\n"
+                "5. Answer the question from the restored content"
+            ),
+        )
+        mgr = agent._manager
+        mgr.register(SystemToolsPlugin())
+        registry_plugin = ToolRegistryPlugin(mgr)
+        mgr.register(registry_plugin)
+
+        answer = agent.run(
+            f"Read {test_file}, then close the read tool, then re-open it. "
+            f"What is the project codename and budget?"
+        )
+        assert "AURORA" in answer or "aurora" in answer.lower()
+        assert "2.5" in answer
+
 
 # ============================================================
 # 2. Long Conversation Memory Recall Rate
