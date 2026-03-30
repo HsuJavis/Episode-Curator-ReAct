@@ -124,8 +124,8 @@ class TestContextThresholdIsModelWindow:
 class TestContextPanelHeight:
     """All 4 lines (bar + 3 categories) should be visible in the panel."""
 
-    def test_render_produces_4_lines(self):
-        """render() should produce exactly 4 lines."""
+    def test_render_produces_5_lines(self):
+        """render() should produce exactly 5 lines (bar + 3 categories + compress threshold)."""
         panel = ContextUsagePanel()
         panel.system_tokens = 5000
         panel.tool_tokens = 2000
@@ -134,7 +134,7 @@ class TestContextPanelHeight:
 
         rendered = panel.render()
         lines = rendered.strip().split("\n")
-        assert len(lines) == 4, f"Expected 4 lines, got {len(lines)}:\n{rendered}"
+        assert len(lines) == 5, f"Expected 5 lines, got {len(lines)}:\n{rendered}"
 
     def test_all_three_categories_in_render(self):
         """All three categories (system, tools, msgs) should appear."""
@@ -162,7 +162,7 @@ class TestContextPanelHeight:
             # The rendered content should all be visible
             rendered = ctx.render()
             lines = rendered.strip().split("\n")
-            assert len(lines) == 4
+            assert len(lines) == 5
             # All three category markers should be present
             assert "█" in rendered  # system marker
             assert "▓" in rendered  # tools marker

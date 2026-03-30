@@ -222,6 +222,7 @@ class ContextUsagePanel(Widget):
     tool_tokens: reactive[int] = reactive(0)
     message_tokens: reactive[int] = reactive(0)
     threshold: reactive[int] = reactive(200000)
+    compress_threshold: reactive[int] = reactive(100000)
 
     def render(self) -> str:
         total = self.system_tokens + self.tool_tokens + self.message_tokens
@@ -234,16 +235,19 @@ class ContextUsagePanel(Widget):
         sys_w = int(self.system_tokens / cap * bar_width)
         tool_w = int(self.tool_tokens / cap * bar_width)
         msg_w = int(self.message_tokens / cap * bar_width)
-        # Fix rounding: ensure segments don't exceed bar
         used_w = sys_w + tool_w + msg_w
         if used_w > bar_width:
             msg_w = max(0, msg_w - (used_w - bar_width))
         empty_w = bar_width - sys_w - tool_w - msg_w
 
-        bar = "█" * sys_w + "▓" * tool_w + "▒" * msg_w + "░" * empty_w
+        # Build bar with compress threshold marker
+        bar_chars = list("█" * sys_w + "▓" * tool_w + "▒" * msg_w + "░" * empty_w)
+        ct_pos = int(self.compress_threshold / cap * bar_width)
+        if 0 < ct_pos < bar_width:
+            bar_chars[ct_pos] = "▏"
+        bar = "".join(bar_chars)
         pct_str = f"{usage_pct:.0%}"
 
-        # Category breakdown
         def cat_line(label: str, value: int, marker: str) -> str:
             pct = value / cap * 100 if cap > 1 else 0
             return f"  {marker} {label:<7} {_format_tokens(value):>6}  {pct:4.1f}%"
@@ -253,6 +257,7 @@ class ContextUsagePanel(Widget):
             cat_line("system", self.system_tokens, "█"),
             cat_line("tools", self.tool_tokens, "▓"),
             cat_line("msgs", self.message_tokens, "▒"),
+            f"  ▏ compress {_format_tokens(self.compress_threshold):>6}",
         ]
         return "\n".join(lines)
 
@@ -395,7 +400,7 @@ class EpisodeCuratorApp(App):
     }
 
     #context-usage {
-        height: 8;
+        height: 9;
         border: solid #1e3a5f;
         border-title-color: #5dade2;
         background: #111d2b;
@@ -470,6 +475,9 @@ class EpisodeCuratorApp(App):
         Binding("ctrl+d", "toggle_detail_system", "Sys", show=True),
         Binding("ctrl+t", "toggle_detail_tools", "Tools", show=True),
         Binding("ctrl+b", "toggle_detail_msgs", "Msgs", show=True),
+        Binding("ctrl+y", "copy_last", "Copy", show=True),
+        Binding("up", "history_up", "", show=False, priority=True),
+        Binding("down", "history_down", "", show=False, priority=True),
     ]
 
     def __init__(self, agent=None, store=None, threshold_pct: int = 50, **kwargs):
@@ -483,6 +491,9 @@ class EpisodeCuratorApp(App):
         self._history: list[dict] = []
         self._context_contents: dict[str, str] = {"system": "", "tools": "", "msgs": ""}
         self._detail_showing: str = ""  # "" = hidden, "system"/"tools"/"msgs" = showing
+        self._input_history: list[str] = []   # command history (max 5)
+        self._history_index: int = -1         # -1 = not browsing
+        self._last_answer: str = ""           # last assistant answer for copy
 
     def compose(self) -> ComposeResult:
         with Vertical(id="root-layout"):
@@ -513,6 +524,7 @@ class EpisodeCuratorApp(App):
 
         ctx_panel = self.query_one("#context-usage", ContextUsagePanel)
         ctx_panel.threshold = self._context_window
+        ctx_panel.compress_threshold = self._threshold
 
         # Load initial episodes
         self._refresh_episodes()
@@ -529,6 +541,12 @@ class EpisodeCuratorApp(App):
         message = event.value.strip()
         if not message:
             return
+
+        # Store in command history (max 5)
+        self._input_history.append(message)
+        if len(self._input_history) > 5:
+            self._input_history = self._input_history[-5:]
+        self._history_index = -1
 
         event.input.value = ""
         log = self.query_one("#log", RichLog)
@@ -569,6 +587,7 @@ class EpisodeCuratorApp(App):
         try:
             ctx_panel = self.query_one("#context-usage", ContextUsagePanel)
             ctx_panel.threshold = self._context_window
+            ctx_panel.compress_threshold = self._threshold
         except Exception:
             pass
 
@@ -631,6 +650,7 @@ class EpisodeCuratorApp(App):
 
         elif kind == "answer":
             text = data.get("text", "")
+            self._last_answer = text
             log.write(f"\n[bold #e0e8f0]▎ assistant[/]  {text}\n")
             status = self.query_one("#status-bar", StatusBar)
             status.busy = False
@@ -748,6 +768,54 @@ class EpisodeCuratorApp(App):
     def action_clear_log(self):
         log = self.query_one("#log", RichLog)
         log.clear()
+
+    def action_history_up(self):
+        """Navigate to previous command in history."""
+        if not self._input_history:
+            return
+        inp = self.query_one("#user-input", Input)
+        if self._history_index == -1:
+            self._history_index = len(self._input_history) - 1
+        elif self._history_index > 0:
+            self._history_index -= 1
+        inp.value = self._input_history[self._history_index]
+        inp.cursor_position = len(inp.value)
+
+    def action_history_down(self):
+        """Navigate to next command in history."""
+        inp = self.query_one("#user-input", Input)
+        if self._history_index == -1:
+            return
+        if self._history_index < len(self._input_history) - 1:
+            self._history_index += 1
+            inp.value = self._input_history[self._history_index]
+            inp.cursor_position = len(inp.value)
+        else:
+            self._history_index = -1
+            inp.value = ""
+
+    def action_copy_last(self):
+        """Copy the last assistant answer to clipboard."""
+        if self._last_answer:
+            import pyperclip
+            try:
+                pyperclip.copy(self._last_answer)
+                log = self.query_one("#log", RichLog)
+                log.write("[dim]  ✂ Copied last answer to clipboard.[/]")
+            except Exception:
+                # pyperclip not installed or clipboard unavailable — use Textual fallback
+                try:
+                    import subprocess
+                    proc = subprocess.Popen(
+                        ["pbcopy"] if __import__("sys").platform == "darwin" else ["xclip", "-selection", "clipboard"],
+                        stdin=subprocess.PIPE,
+                    )
+                    proc.communicate(self._last_answer.encode("utf-8"))
+                    log = self.query_one("#log", RichLog)
+                    log.write("[dim]  ✂ Copied last answer to clipboard.[/]")
+                except Exception:
+                    log = self.query_one("#log", RichLog)
+                    log.write("[dim yellow]  ✂ Copy failed — clipboard not available.[/]")
 
     def action_quit(self):
         self.exit()

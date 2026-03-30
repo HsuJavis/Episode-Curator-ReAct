@@ -20,7 +20,7 @@ from typing import Any
 from react_agent import SkillPlugin
 
 MAX_OUTPUT = 100_000  # 100KB cap for bash output
-MAX_FETCH = 500_000   # 500KB cap for web_fetch
+MAX_FETCH = 50_000    # 50KB cap for web_fetch (fits in LLM context)
 
 
 class SystemToolsPlugin(SkillPlugin):
@@ -116,7 +116,7 @@ class SystemToolsPlugin(SkillPlugin):
                 "properties": {
                     "url": {"type": "string", "description": "URL to fetch"},
                     "timeout": {"type": "integer", "description": "Timeout in seconds (default 15)"},
-                    "max_size": {"type": "integer", "description": "Max response bytes (default 500000)"},
+                    "max_size": {"type": "integer", "description": "Max response bytes (default 50000)"},
                 },
                 "required": ["url"],
             },
