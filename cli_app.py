@@ -366,6 +366,9 @@ class EpisodeCuratorApp(App):
         log.write("[dim]─── Episode Curator ReAct Agent ───[/]")
         log.write("[dim]Type a message below to start.[/]\n")
 
+        # Focus input so user can start typing immediately
+        self.query_one("#user-input", Input).focus()
+
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         message = event.value.strip()
         if not message:
