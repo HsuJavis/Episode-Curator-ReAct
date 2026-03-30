@@ -585,13 +585,19 @@ class EpisodeCuratorApp(App):
     @work(thread=True)
     def _run_agent(self, message: str) -> None:
         if self._agent is None:
-            self._init_agent()
+            try:
+                self._init_agent()
+            except Exception as e:
+                logger.error("init_agent.failed | error=%s", e, exc_info=True)
+                self.call_from_thread(self._on_error, f"Agent init failed: {e}")
+                return
 
         try:
             answer = self._agent.run(message, list(self._history))
             self._history.append({"role": "user", "content": message})
             self._history.append({"role": "assistant", "content": answer})
         except Exception as e:
+            logger.error("run_agent.failed | error=%s", e, exc_info=True)
             self.call_from_thread(self._on_error, str(e))
 
     def _init_agent(self):
@@ -906,6 +912,9 @@ def _setup_logging(log_file: str = "agent.log", level: str = "DEBUG") -> None:
     fmt = "%(asctime)s %(levelname)-5s %(name)s | %(message)s"
     handler = logging.FileHandler(log_file, encoding="utf-8")
     handler.setFormatter(logging.Formatter(fmt, datefmt="%H:%M:%S"))
+    handler.setLevel(logging.DEBUG)
+    # Flush immediately on every log (no buffering — critical for crash diagnosis)
+    handler.stream.reconfigure(line_buffering=True)
     for name in ("react_agent", "episode_curator", "system_tools", "cli_app",
                  "tool_registry", "skill_loader", "hook_manager", "mcp_client"):
         mod_logger = logging.getLogger(name)

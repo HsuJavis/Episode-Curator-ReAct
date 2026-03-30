@@ -296,7 +296,12 @@ class ReActAgent:
         ctx.messages.append({"role": "user", "content": user_query})
         logger.info("agent.run | model=%s query=%s history_len=%d",
                      self.model, user_query[:80], len(ctx.messages) - 1)
-        self._manager.dispatch_on_agent_start(ctx)
+        try:
+            self._manager.dispatch_on_agent_start(ctx)
+        except Exception as e:
+            logger.error("agent.on_start_failed | error=%s", e, exc_info=True)
+            raise
+        logger.debug("agent.start_done | extra_len=%d", len(ctx.metadata.get("system_prompt_extra", "")))
         final_answer = self._react_loop(ctx)
         logger.info("agent.run.done | iterations=%d in=%d out=%d elapsed=%.1fs",
                      ctx.iteration, ctx.total_input_tokens, ctx.total_output_tokens,
@@ -334,6 +339,8 @@ class ReActAgent:
             # Use streaming to emit text deltas in real time
             # Retry up to 2 times on 401 (OAuth token may have expired mid-session)
             response = None
+            logger.debug("api.call | iter=%d model=%s tools=%d msgs=%d",
+                         ctx.iteration, self.model, len(tools), len(ctx.messages))
             for _attempt in range(3):
                 try:
                     with self._client.messages.stream(**api_params) as stream:
@@ -347,15 +354,18 @@ class ReActAgent:
                         time.sleep(2)
                         token = _read_oauth_token()
                         if token:
-                            logger.info("api.token_refreshed")
+                            logger.info("api.token_refreshed | token_prefix=%s", token[:15])
                             self._client = anthropic.Anthropic(api_key=token)
                             self._uses_oauth = True
+                        else:
+                            logger.error("api.no_token | OAuth credentials file missing or empty")
                     else:
                         logger.error("api.auth_failed | all 3 attempts exhausted")
-                        raise ValueError(
-                            "Authentication failed after 3 attempts. "
-                            "Ensure Claude Code is running (for OAuth) or check ANTHROPIC_API_KEY."
-                        )
+                        raise
+                except Exception as e:
+                    logger.error("api.error | attempt=%d/%d type=%s error=%s",
+                                 _attempt + 1, 3, type(e).__name__, e)
+                    raise
 
             # Track token usage
             input_tokens = response.usage.input_tokens
