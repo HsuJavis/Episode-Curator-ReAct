@@ -386,3 +386,227 @@ class TestReactLoopDynamicTools:
         assert len(active) < len(all_tools)
         assert len(active) == 1  # only recall_episode
         assert len(all_tools) == 4
+
+
+# ── Close Book: context compression on unload ────────────────
+
+
+def _make_tool_use_block(tool_id, name, tool_input):
+    """Create a mock tool_use block (simulates Anthropic API response object)."""
+    class MockToolUse:
+        def __init__(self, id, name, input):
+            self.type = "tool_use"
+            self.id = id
+            self.name = name
+            self.input = input
+    return MockToolUse(tool_id, name, tool_input)
+
+
+def _make_text_block(text):
+    """Create a mock text block."""
+    class MockText:
+        def __init__(self, text):
+            self.type = "text"
+            self.text = text
+    return MockText(text)
+
+
+def _build_conversation_with_tool_calls():
+    """Build a realistic ctx.messages with tool_use/tool_result pairs.
+
+    Simulates:
+    1. User asks question
+    2. Assistant thinks + calls read tool
+    3. User sends tool_result with large file content
+    4. Assistant thinks + calls grep tool
+    5. User sends tool_result with grep results
+    6. Assistant gives answer
+    """
+    large_file_content = "line " * 500  # ~2500 chars of file content
+    grep_results = "match: " * 200      # ~1400 chars of grep results
+
+    messages = [
+        # [0] user question
+        {"role": "user", "content": "Search for bugs in main.py"},
+        # [1] assistant thinks + calls read
+        {"role": "assistant", "content": [
+            _make_text_block("Let me read the file first."),
+            _make_tool_use_block("tu_001", "read", {"file_path": "main.py"}),
+        ]},
+        # [2] tool_result for read
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "tu_001", "content": large_file_content},
+        ]},
+        # [3] assistant thinks + calls grep
+        {"role": "assistant", "content": [
+            _make_text_block("Now let me search for error patterns."),
+            _make_tool_use_block("tu_002", "grep", {"pattern": "error|bug", "path": "."}),
+        ]},
+        # [4] tool_result for grep
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "tu_002", "content": grep_results},
+        ]},
+        # [5] assistant final answer
+        {"role": "assistant", "content": [
+            _make_text_block("I found 3 potential bugs in main.py."),
+        ]},
+    ]
+    return messages, large_file_content, grep_results
+
+
+class TestCloseBookCompression:
+    """When unload_tools is called, tool_result content should be compressed."""
+
+    def test_unload_compresses_tool_results(self):
+        """After unload, tool_result content should be shortened."""
+        from tool_registry import ToolRegistryPlugin
+        mgr = SkillPluginManager()
+        mgr.register(DeferredPlugin())
+        plugin = ToolRegistryPlugin(mgr)
+        mgr.register(plugin)
+        mgr.load_tools(["read", "grep"])
+
+        messages, large_content, grep_content = _build_conversation_with_tool_calls()
+        ctx = AgentContext(user_query="test", messages=messages)
+
+        # Unload via after_action hook (simulating tool execution)
+        tc = {"name": "unload_tools", "input": {"names": ["read", "grep"]}, "id": "tu_meta"}
+        plugin.after_action(ctx, tc, "Unloaded tools: read, grep")
+
+        # Check tool_result for read (message[2]) is compressed
+        read_result = ctx.messages[2]["content"][0]
+        assert len(read_result["content"]) < len(large_content)
+        assert "compressed" in read_result["content"].lower() or len(read_result["content"]) < 200
+
+        # Check tool_result for grep (message[4]) is compressed
+        grep_result = ctx.messages[4]["content"][0]
+        assert len(grep_result["content"]) < len(grep_content)
+
+    def test_unload_preserves_tool_result_structure(self):
+        """Compressed tool_results should still have type and tool_use_id."""
+        from tool_registry import ToolRegistryPlugin
+        mgr = SkillPluginManager()
+        mgr.register(DeferredPlugin())
+        plugin = ToolRegistryPlugin(mgr)
+        mgr.register(plugin)
+        mgr.load_tools(["read"])
+
+        messages, _, _ = _build_conversation_with_tool_calls()
+        ctx = AgentContext(user_query="test", messages=messages)
+
+        tc = {"name": "unload_tools", "input": {"names": ["read"]}, "id": "tu_meta"}
+        plugin.after_action(ctx, tc, "Unloaded tools: read")
+
+        read_result = ctx.messages[2]["content"][0]
+        assert read_result["type"] == "tool_result"
+        assert read_result["tool_use_id"] == "tu_001"
+
+    def test_unload_only_compresses_targeted_tools(self):
+        """Only unloaded tools' results should be compressed, not others."""
+        from tool_registry import ToolRegistryPlugin
+        mgr = SkillPluginManager()
+        mgr.register(DeferredPlugin())
+        plugin = ToolRegistryPlugin(mgr)
+        mgr.register(plugin)
+        mgr.load_tools(["read", "grep"])
+
+        messages, large_content, grep_content = _build_conversation_with_tool_calls()
+        ctx = AgentContext(user_query="test", messages=messages)
+
+        # Only unload 'read', not 'grep'
+        tc = {"name": "unload_tools", "input": {"names": ["read"]}, "id": "tu_meta"}
+        plugin.after_action(ctx, tc, "Unloaded tools: read")
+
+        # read result (msg[2]) should be compressed
+        read_result = ctx.messages[2]["content"][0]
+        assert len(read_result["content"]) < len(large_content)
+
+        # grep result (msg[4]) should NOT be compressed
+        grep_result = ctx.messages[4]["content"][0]
+        assert grep_result["content"] == grep_content
+
+    def test_unload_does_not_touch_non_tool_messages(self):
+        """User text messages and assistant text should be untouched."""
+        from tool_registry import ToolRegistryPlugin
+        mgr = SkillPluginManager()
+        mgr.register(DeferredPlugin())
+        plugin = ToolRegistryPlugin(mgr)
+        mgr.register(plugin)
+        mgr.load_tools(["read"])
+
+        messages, _, _ = _build_conversation_with_tool_calls()
+        ctx = AgentContext(user_query="test", messages=messages)
+        original_user_msg = ctx.messages[0]["content"]
+
+        tc = {"name": "unload_tools", "input": {"names": ["read"]}, "id": "tu_meta"}
+        plugin.after_action(ctx, tc, "Unloaded tools: read")
+
+        assert ctx.messages[0]["content"] == original_user_msg
+
+    def test_unload_keeps_metadata_summary(self):
+        """Compressed result should contain tool name and brief summary of what was returned."""
+        from tool_registry import ToolRegistryPlugin
+        mgr = SkillPluginManager()
+        mgr.register(DeferredPlugin())
+        plugin = ToolRegistryPlugin(mgr)
+        mgr.register(plugin)
+        mgr.load_tools(["read"])
+
+        messages, _, _ = _build_conversation_with_tool_calls()
+        ctx = AgentContext(user_query="test", messages=messages)
+
+        tc = {"name": "unload_tools", "input": {"names": ["read"]}, "id": "tu_meta"}
+        plugin.after_action(ctx, tc, "Unloaded tools: read")
+
+        read_result = ctx.messages[2]["content"][0]
+        content = read_result["content"]
+        # Should mention the tool or have some preview of original content
+        assert "read" in content.lower() or "line" in content.lower()
+
+    def test_small_results_not_compressed(self):
+        """Tool results under threshold should not be compressed."""
+        from tool_registry import ToolRegistryPlugin
+        mgr = SkillPluginManager()
+        mgr.register(DeferredPlugin())
+        plugin = ToolRegistryPlugin(mgr)
+        mgr.register(plugin)
+        mgr.load_tools(["read"])
+
+        small_content = "just 3 lines"
+        messages = [
+            {"role": "user", "content": "read a small file"},
+            {"role": "assistant", "content": [
+                _make_tool_use_block("tu_s1", "read", {"file_path": "tiny.txt"}),
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tu_s1", "content": small_content},
+            ]},
+        ]
+        ctx = AgentContext(user_query="test", messages=messages)
+
+        tc = {"name": "unload_tools", "input": {"names": ["read"]}, "id": "tu_meta"}
+        plugin.after_action(ctx, tc, "Unloaded tools: read")
+
+        # Small content should remain unchanged
+        result = ctx.messages[2]["content"][0]
+        assert result["content"] == small_content
+
+    def test_non_unload_tool_call_does_not_compress(self):
+        """after_action for other tools (not unload_tools) should not compress."""
+        from tool_registry import ToolRegistryPlugin
+        mgr = SkillPluginManager()
+        mgr.register(DeferredPlugin())
+        plugin = ToolRegistryPlugin(mgr)
+        mgr.register(plugin)
+        mgr.load_tools(["read"])
+
+        messages, large_content, _ = _build_conversation_with_tool_calls()
+        ctx = AgentContext(user_query="test", messages=messages)
+
+        # Simulate a load_tools call (not unload)
+        tc = {"name": "load_tools", "input": {"names": ["bash"]}, "id": "tu_meta"}
+        plugin.after_action(ctx, tc, "Loaded tools: bash")
+
+        # read result should NOT be compressed
+        read_result = ctx.messages[2]["content"][0]
+        assert read_result["content"] == large_content
