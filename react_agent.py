@@ -322,22 +322,28 @@ class ReActAgent:
                 api_params["tools"] = tools
 
             # Use streaming to emit text deltas in real time
-            # Retry once on 401 (OAuth token may have expired mid-session)
-            try:
-                with self._client.messages.stream(**api_params) as stream:
-                    for delta in stream.text_stream:
-                        self._manager.dispatch_on_stream_delta(ctx, delta)
-                    response = stream.get_final_message()
-            except anthropic.AuthenticationError:
-                # Force re-read OAuth token regardless of _uses_oauth flag
-                token = _read_oauth_token()
-                if token:
-                    self._client = anthropic.Anthropic(api_key=token)
-                    self._uses_oauth = True
-                with self._client.messages.stream(**api_params) as stream:
-                    for delta in stream.text_stream:
-                        self._manager.dispatch_on_stream_delta(ctx, delta)
-                    response = stream.get_final_message()
+            # Retry up to 2 times on 401 (OAuth token may have expired mid-session)
+            response = None
+            for _attempt in range(3):
+                try:
+                    with self._client.messages.stream(**api_params) as stream:
+                        for delta in stream.text_stream:
+                            self._manager.dispatch_on_stream_delta(ctx, delta)
+                        response = stream.get_final_message()
+                    break  # success
+                except anthropic.AuthenticationError:
+                    if _attempt < 2:
+                        # Wait for Claude Code to refresh the OAuth token on disk
+                        time.sleep(2)
+                        token = _read_oauth_token()
+                        if token:
+                            self._client = anthropic.Anthropic(api_key=token)
+                            self._uses_oauth = True
+                    else:
+                        raise ValueError(
+                            "Authentication failed after 3 attempts. "
+                            "Ensure Claude Code is running (for OAuth) or check ANTHROPIC_API_KEY."
+                        )
 
             # Track token usage
             input_tokens = response.usage.input_tokens
