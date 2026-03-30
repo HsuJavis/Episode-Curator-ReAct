@@ -133,13 +133,14 @@ class TestTUIContextWindowFromModel:
 # ============================================================
 
 class TestCLIThresholdPct:
-    """CLI should support --threshold-pct to set compression threshold as percentage."""
+    """Threshold percentage configuration."""
 
-    def test_cli_models_dict(self):
-        """cli.py should have a MODELS dict."""
-        from cli import MODELS
-        assert "haiku" in MODELS
-        assert "sonnet" in MODELS
+    def test_model_context_windows_has_known_models(self):
+        """MODEL_CONTEXT_WINDOWS should contain haiku and sonnet."""
+        from cli_app import MODEL_CONTEXT_WINDOWS
+        models = list(MODEL_CONTEXT_WINDOWS.keys())
+        assert any("haiku" in m for m in models)
+        assert any("sonnet" in m for m in models)
 
     def test_threshold_calculation_from_pct(self):
         """Given model and pct, threshold should be window * pct / 100."""
