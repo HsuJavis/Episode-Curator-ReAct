@@ -244,6 +244,10 @@ class EpisodeCuratorApp(App):
         color: #c8d6e5;
     }
 
+    #root-layout {
+        height: 1fr;
+    }
+
     #main-area {
         height: 1fr;
     }
@@ -294,7 +298,6 @@ class EpisodeCuratorApp(App):
 
     #input-area {
         height: 3;
-        dock: bottom;
         background: #0d1520;
         border-top: solid #1e3a5f;
         padding: 0 1;
@@ -311,7 +314,6 @@ class EpisodeCuratorApp(App):
     }
 
     #status-bar {
-        dock: bottom;
         height: 1;
         background: #0a1018;
         color: #5dade2;
@@ -332,23 +334,24 @@ class EpisodeCuratorApp(App):
         self._history: list[dict] = []
 
     def compose(self) -> ComposeResult:
-        yield Horizontal(
-            Vertical(
-                RichLog(highlight=True, markup=True, wrap=True, id="log"),
-                id="conversation",
-            ),
-            Vertical(
-                ContextUsagePanel(id="context-usage"),
-                EpisodeSummaryPanel(id="episodes"),
-                id="sidebar",
-            ),
-            id="main-area",
-        )
-        yield Horizontal(
-            Input(placeholder="Type your message...", id="user-input"),
-            id="input-area",
-        )
-        yield StatusBar(id="status-bar")
+        with Vertical(id="root-layout"):
+            yield Horizontal(
+                Vertical(
+                    RichLog(highlight=True, markup=True, wrap=True, id="log"),
+                    id="conversation",
+                ),
+                Vertical(
+                    ContextUsagePanel(id="context-usage"),
+                    EpisodeSummaryPanel(id="episodes"),
+                    id="sidebar",
+                ),
+                id="main-area",
+            )
+            yield Horizontal(
+                Input(placeholder="Type your message...", id="user-input"),
+                id="input-area",
+            )
+            yield StatusBar(id="status-bar")
 
     def on_mount(self) -> None:
         self.query_one("#conversation", Vertical).border_title = "◈ Conversation"
@@ -402,8 +405,12 @@ class EpisodeCuratorApp(App):
         storage_dir = os.environ.get("EPISODE_STORE_DIR",
                                      os.path.expanduser("~/.episode_store"))
         api_key = os.environ.get("ANTHROPIC_API_KEY")
+        worker_model = os.environ.get("WORKER_MODEL", "claude-haiku-4-5-20251001")
+        curator_model = os.environ.get("CURATOR_MODEL", "claude-haiku-4-5-20251001")
 
         self._agent = create_agent(
+            worker_model=worker_model,
+            curator_model=curator_model,
             storage_dir=storage_dir,
             api_key=api_key,
             threshold=self._threshold,

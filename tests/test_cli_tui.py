@@ -93,6 +93,36 @@ class TestWidgetLayout:
             assert inp.region.height > 0
 
     @pytest.mark.asyncio
+    async def test_input_area_not_overlapped_by_status_bar(self, app):
+        """Input area and status bar must not overlap — input must be fully visible."""
+        async with app.run_test(size=(120, 30)) as pilot:
+            input_area = app.query_one("#input-area")
+            status_bar = app.query_one("#status-bar", StatusBar)
+
+            ia_bottom = input_area.region.y + input_area.region.height
+            sb_top = status_bar.region.y
+
+            assert ia_bottom <= sb_top, (
+                f"Input area (y={input_area.region.y}, h={input_area.region.height}) "
+                f"overlaps status bar (y={status_bar.region.y}): "
+                f"input bottom {ia_bottom} > status top {sb_top}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_input_area_not_overlapped_small_terminal(self, app):
+        """Even in a small terminal (80x24), input should not be covered."""
+        async with app.run_test(size=(80, 24)) as pilot:
+            input_area = app.query_one("#input-area")
+            status_bar = app.query_one("#status-bar", StatusBar)
+
+            ia_bottom = input_area.region.y + input_area.region.height
+            sb_top = status_bar.region.y
+
+            assert ia_bottom <= sb_top, (
+                f"Overlap in small terminal: input bottom {ia_bottom} > status top {sb_top}"
+            )
+
+    @pytest.mark.asyncio
     async def test_initial_context_panel_renders(self, app):
         """Context usage panel should render with CONTEXT WINDOW header."""
         async with app.run_test(size=(120, 40)) as pilot:
