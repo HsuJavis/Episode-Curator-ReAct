@@ -41,7 +41,6 @@ class TUIPlugin(SkillPlugin):
         self._cumulative_input_tokens: int = 0
         self._cumulative_output_tokens: int = 0
         self._total_turns: int = 0
-        self._streamed_current: bool = False  # suppress on_thought when streamed
 
     def set_callback(self, cb: Callable[[TUIEvent], None]):
         self._callback = cb
@@ -57,7 +56,6 @@ class TUIPlugin(SkillPlugin):
     def on_agent_start(self, ctx: AgentContext) -> None:
         self._last_episode_count = self._count_episodes()
         self._total_turns += 1
-        self._streamed_current = False
         self._emit("status", iteration=0, max_iterations=0,
                    input_tokens=self._cumulative_input_tokens,
                    output_tokens=self._cumulative_output_tokens,
@@ -66,8 +64,7 @@ class TUIPlugin(SkillPlugin):
                    context={"system": 0, "tools": 0, "messages": 0})
 
     def on_thought(self, ctx: AgentContext, thought: str) -> Optional[str]:
-        if not self._streamed_current:
-            self._emit("thought", text=thought)
+        self._emit("thought", text=thought)
         return None
 
     def before_action(self, ctx: AgentContext, tool_call: dict) -> Optional[dict]:
@@ -81,8 +78,9 @@ class TUIPlugin(SkillPlugin):
         return None
 
     def on_stream_delta(self, ctx: AgentContext, delta: str) -> None:
-        self._streamed_current = True
-        self._emit("stream_delta", text=delta)
+        # Streaming is used at the API level for responsiveness.
+        # Text display is handled by on_thought (once, after stream completes).
+        pass
 
     def on_token_usage(self, ctx: AgentContext, input_tokens: int, output_tokens: int) -> None:
         # Emit raw context content for detail panel — include base system prompt
@@ -527,29 +525,16 @@ class EpisodeCuratorApp(App):
 
     def _handle_event(self, event: TUIEvent):
         log = self.query_one("#log", RichLog)
-        stream_widget = self.query_one("#stream-output", Static)
         kind = event.kind
         data = event.data
 
-        if kind == "stream_delta":
-            text = data.get("text", "")
-            if not hasattr(self, '_stream_buffer'):
-                self._stream_buffer = ""
-            self._stream_buffer += text
-            stream_widget.update(self._stream_buffer)
-            stream_widget.add_class("streaming")
-            return
-
-        elif kind == "thought":
-            # If we were streaming, flush buffer as thought
-            self._flush_stream(log, stream_widget, style="thought")
+        if kind == "thought":
             text = data.get("text", "")
             if len(text) > 200:
                 text = text[:197] + "..."
             log.write(f"[dim italic #6c7a89]  💭 {text}[/]")
 
         elif kind == "action":
-            self._flush_stream(log, stream_widget, style="thought")
             tool = data.get("tool", "?")
             inp = data.get("input", {})
             inp_str = json.dumps(inp, ensure_ascii=False)
@@ -564,7 +549,6 @@ class EpisodeCuratorApp(App):
             log.write(f"[#4ecca3]  📋 {result}[/]")
 
         elif kind == "answer":
-            self._flush_stream(log, stream_widget, style="answer")
             text = data.get("text", "")
             log.write(f"\n[bold #e0e8f0]▎ assistant[/]  {text}\n")
             status = self.query_one("#status-bar", StatusBar)
@@ -595,20 +579,6 @@ class EpisodeCuratorApp(App):
             status = self.query_one("#status-bar", StatusBar)
             status.busy = False
             self._refresh_episodes()
-
-    def _flush_stream(self, log: RichLog, stream_widget: Static, style: str = "thought"):
-        """Flush accumulated stream buffer to the log and hide stream widget."""
-        buf = getattr(self, '_stream_buffer', '')
-        if buf.strip():
-            if style == "answer":
-                pass  # answer event will write the final text
-            else:
-                if len(buf) > 200:
-                    buf = buf[:197] + "..."
-                log.write(f"[dim italic #6c7a89]  💭 {buf}[/]")
-        self._stream_buffer = ""
-        stream_widget.update("")
-        stream_widget.remove_class("streaming")
 
     def _update_status(self, data: dict):
         status = self.query_one("#status-bar", StatusBar)

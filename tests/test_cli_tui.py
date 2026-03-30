@@ -639,9 +639,10 @@ class TestTUIPlugin:
 
 
 class TestStreamingEvents:
-    """TUIPlugin should emit stream_delta events and suppress duplicate on_thought."""
+    """Streaming is used at API level; on_thought displays text once after stream completes."""
 
-    def test_stream_delta_emitted(self):
+    def test_stream_delta_is_noop_in_tui(self):
+        """on_stream_delta should not emit events (streaming is API-level only)."""
         plugin = TUIPlugin()
         events = []
         plugin.set_callback(lambda e: events.append(e))
@@ -651,81 +652,38 @@ class TestStreamingEvents:
         plugin.on_stream_delta(ctx, "world")
 
         deltas = [e for e in events if e.kind == "stream_delta"]
-        assert len(deltas) == 2
-        assert deltas[0].data["text"] == "Hello "
-        assert deltas[1].data["text"] == "world"
+        assert len(deltas) == 0
 
-    def test_thought_suppressed_after_streaming(self):
-        """on_thought should NOT emit when text was already streamed."""
+    def test_thought_always_emitted(self):
+        """on_thought should always emit — it is the single display path for text."""
         plugin = TUIPlugin()
         events = []
         plugin.set_callback(lambda e: events.append(e))
 
         ctx = AgentContext(user_query="test")
-        # Stream some text first
-        plugin.on_stream_delta(ctx, "Let me think...")
-        # Now on_thought fires with the same text — should be suppressed
-        plugin.on_thought(ctx, "Let me think...")
-
-        thoughts = [e for e in events if e.kind == "thought"]
-        assert len(thoughts) == 0  # suppressed because we streamed
-
-    def test_thought_emitted_when_not_streaming(self):
-        """on_thought should still emit when no streaming happened."""
-        plugin = TUIPlugin()
-        events = []
-        plugin.set_callback(lambda e: events.append(e))
-
-        ctx = AgentContext(user_query="test")
+        plugin.on_stream_delta(ctx, "streamed text")  # no-op
         plugin.on_thought(ctx, "Thinking normally")
 
         thoughts = [e for e in events if e.kind == "thought"]
         assert len(thoughts) == 1
+        assert thoughts[0].data["text"] == "Thinking normally"
 
-    def test_stream_flag_persists_through_token_usage(self):
-        """_streamed_current stays True through on_token_usage so on_thought is suppressed."""
-        plugin = TUIPlugin()
-        events = []
-        plugin.set_callback(lambda e: events.append(e))
-        plugin._system_base_tokens = 100
-        plugin._tool_tokens = 50
-
-        ctx = AgentContext(user_query="test")
-        ctx.start_time = time.time()
-        ctx.iteration = 1
-
-        # Stream some text
-        plugin.on_stream_delta(ctx, "hello")
-        assert plugin._streamed_current is True
-
-        # Token usage fires — flag should NOT reset (thought comes after)
-        plugin.on_token_usage(ctx, 500, 100)
-        assert plugin._streamed_current is True
-
-        # on_thought should be suppressed (text was already streamed)
-        plugin.on_thought(ctx, "Same text")
-        thoughts = [e for e in events if e.kind == "thought"]
-        assert len(thoughts) == 0
-
-    def test_stream_flag_resets_on_new_run(self):
-        """_streamed_current resets on on_agent_start (new run)."""
+    def test_thought_emitted_across_multiple_runs(self):
+        """on_thought should work consistently across multiple agent runs."""
         plugin = TUIPlugin()
         events = []
         plugin.set_callback(lambda e: events.append(e))
 
         ctx1 = AgentContext(user_query="q1")
-        plugin.on_stream_delta(ctx1, "hello")
-        assert plugin._streamed_current is True
+        plugin.on_agent_start(ctx1)
+        plugin.on_thought(ctx1, "Thought 1")
 
-        # New run resets
         ctx2 = AgentContext(user_query="q2")
         plugin.on_agent_start(ctx2)
-        assert plugin._streamed_current is False
+        plugin.on_thought(ctx2, "Thought 2")
 
-        # on_thought works in new run
-        plugin.on_thought(ctx2, "Fresh thought")
         thoughts = [e for e in events if e.kind == "thought"]
-        assert len(thoughts) == 1
+        assert len(thoughts) == 2
 
 
 class TestStatusTurnCounter:
@@ -848,32 +806,6 @@ class TestContextDetailPanel:
         async with app.run_test(size=(120, 40)) as pilot:
             stream = app.query_one("#stream-output")
             assert stream is not None
-            assert "streaming" not in stream.classes
-
-    @pytest.mark.asyncio
-    async def test_stream_delta_shows_in_widget(self, app):
-        """stream_delta event should update the stream output widget."""
-        async with app.run_test(size=(120, 40)) as pilot:
-            from textual.widgets import Static
-            stream = app.query_one("#stream-output", Static)
-            app._handle_event(TUIEvent("stream_delta", {"text": "Hello "}))
-            app._handle_event(TUIEvent("stream_delta", {"text": "world"}))
-            await pilot.pause()
-            assert "streaming" in stream.classes
-
-    @pytest.mark.asyncio
-    async def test_stream_cleared_on_answer(self, app):
-        """Answer event should clear stream buffer and hide widget."""
-        async with app.run_test(size=(120, 40)) as pilot:
-            from textual.widgets import Static
-            stream = app.query_one("#stream-output", Static)
-            app._handle_event(TUIEvent("stream_delta", {"text": "streaming..."}))
-            await pilot.pause()
-            assert "streaming" in stream.classes
-
-            app._handle_event(TUIEvent("answer", {"text": "Final answer"}))
-            await pilot.pause()
-            assert "streaming" not in stream.classes
 
 
 # ============================================================
