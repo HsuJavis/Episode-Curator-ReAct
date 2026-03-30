@@ -244,14 +244,31 @@ def _read_oauth_token() -> str | None:
     return None
 
 
-def _try_cli_token_refresh() -> None:
-    """Try to trigger OAuth token refresh via claude CLI."""
+def _try_cli_token_refresh() -> bool:
+    """Trigger OAuth token refresh by making a minimal Claude CLI API call.
+
+    Claude Code uses DPoP (OAuth 2.1) — we can't refresh tokens ourselves.
+    Instead, we trigger the CLI to make a call, which forces it to refresh
+    the token and write the new one to ~/.claude/.credentials.json.
+    """
     import subprocess as _sp
     try:
-        _sp.run(["claude", "auth", "status"], capture_output=True, timeout=10)
-        logger.info("api.cli_refresh_triggered")
-    except Exception:
-        pass  # CLI not available, no-op
+        # A minimal prompt that forces the CLI to authenticate and refresh
+        result = _sp.run(
+            ["claude", "--print", "-p", "hi"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0:
+            logger.info("api.cli_refresh_ok | CLI call succeeded, token should be fresh")
+            return True
+        else:
+            logger.warning("api.cli_refresh_failed | returncode=%d stderr=%s",
+                           result.returncode, result.stderr[:100])
+    except FileNotFoundError:
+        logger.warning("api.cli_not_found | claude CLI not installed")
+    except Exception as e:
+        logger.warning("api.cli_refresh_error | %s", e)
+    return False
 
 
 def _is_oauth_auth(api_key: str | None) -> bool:
