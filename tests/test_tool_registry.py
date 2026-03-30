@@ -610,3 +610,161 @@ class TestCloseBookCompression:
         # read result should NOT be compressed
         read_result = ctx.messages[2]["content"][0]
         assert read_result["content"] == large_content
+
+
+# ── Re-expand: load_tools restores compressed results ────────
+
+
+class TestReExpandOnLoad:
+    """When load_tools is called, previously compressed tool_results should be restored."""
+
+    def test_unload_saves_originals_to_metadata(self):
+        """Compression should save original content to ctx.metadata for later re-expand."""
+        from tool_registry import ToolRegistryPlugin
+        mgr = SkillPluginManager()
+        mgr.register(DeferredPlugin())
+        plugin = ToolRegistryPlugin(mgr)
+        mgr.register(plugin)
+        mgr.load_tools(["read"])
+
+        messages, large_content, _ = _build_conversation_with_tool_calls()
+        ctx = AgentContext(user_query="test", messages=messages)
+
+        tc = {"name": "unload_tools", "input": {"names": ["read"]}, "id": "tu_meta"}
+        plugin.after_action(ctx, tc, "Unloaded tools: read")
+
+        # Original content should be saved in metadata
+        compressed_store = ctx.metadata.get("_compressed_results", {})
+        assert "tu_001" in compressed_store
+        assert compressed_store["tu_001"] == large_content
+
+    def test_load_restores_compressed_results(self):
+        """load_tools should restore previously compressed tool_results."""
+        from tool_registry import ToolRegistryPlugin
+        mgr = SkillPluginManager()
+        mgr.register(DeferredPlugin())
+        plugin = ToolRegistryPlugin(mgr)
+        mgr.register(plugin)
+        mgr.load_tools(["read"])
+
+        messages, large_content, _ = _build_conversation_with_tool_calls()
+        ctx = AgentContext(user_query="test", messages=messages)
+
+        # Close book
+        tc_unload = {"name": "unload_tools", "input": {"names": ["read"]}, "id": "tu_u1"}
+        plugin.after_action(ctx, tc_unload, "Unloaded tools: read")
+
+        # Verify compressed
+        read_result = ctx.messages[2]["content"][0]
+        assert len(read_result["content"]) < len(large_content)
+
+        # Re-open book
+        tc_load = {"name": "load_tools", "input": {"names": ["read"]}, "id": "tu_l1"}
+        plugin.after_action(ctx, tc_load, "Loaded tools: read")
+
+        # Verify restored
+        read_result = ctx.messages[2]["content"][0]
+        assert read_result["content"] == large_content
+
+    def test_full_close_reopen_cycle(self):
+        """Full cycle: load → use → close → re-open → content restored."""
+        from tool_registry import ToolRegistryPlugin
+        mgr = SkillPluginManager()
+        mgr.register(DeferredPlugin())
+        plugin = ToolRegistryPlugin(mgr)
+        mgr.register(plugin)
+        mgr.load_tools(["read", "grep"])
+
+        messages, large_content, grep_content = _build_conversation_with_tool_calls()
+        ctx = AgentContext(user_query="test", messages=messages)
+
+        # Close both
+        tc = {"name": "unload_tools", "input": {"names": ["read", "grep"]}, "id": "tu_u"}
+        plugin.after_action(ctx, tc, "Unloaded tools: read, grep")
+
+        # Both compressed
+        assert len(ctx.messages[2]["content"][0]["content"]) < len(large_content)
+        assert len(ctx.messages[4]["content"][0]["content"]) < len(grep_content)
+
+        # Re-open only read
+        tc = {"name": "load_tools", "input": {"names": ["read"]}, "id": "tu_l"}
+        plugin.after_action(ctx, tc, "Loaded tools: read")
+
+        # read restored, grep still compressed
+        assert ctx.messages[2]["content"][0]["content"] == large_content
+        assert len(ctx.messages[4]["content"][0]["content"]) < len(grep_content)
+
+        # Re-open grep
+        tc = {"name": "load_tools", "input": {"names": ["grep"]}, "id": "tu_l2"}
+        plugin.after_action(ctx, tc, "Loaded tools: grep")
+
+        # Both restored
+        assert ctx.messages[4]["content"][0]["content"] == grep_content
+
+    def test_load_without_prior_compress_is_noop(self):
+        """load_tools on tools that were never compressed should not crash."""
+        from tool_registry import ToolRegistryPlugin
+        mgr = SkillPluginManager()
+        mgr.register(DeferredPlugin())
+        plugin = ToolRegistryPlugin(mgr)
+        mgr.register(plugin)
+
+        messages, large_content, _ = _build_conversation_with_tool_calls()
+        ctx = AgentContext(user_query="test", messages=messages)
+
+        # Load without prior unload — should be harmless
+        tc = {"name": "load_tools", "input": {"names": ["read"]}, "id": "tu_l"}
+        plugin.after_action(ctx, tc, "Loaded tools: read")
+
+        # Content unchanged
+        assert ctx.messages[2]["content"][0]["content"] == large_content
+
+    def test_compressed_store_cleaned_after_restore(self):
+        """After re-expand, the stored originals should be removed from metadata."""
+        from tool_registry import ToolRegistryPlugin
+        mgr = SkillPluginManager()
+        mgr.register(DeferredPlugin())
+        plugin = ToolRegistryPlugin(mgr)
+        mgr.register(plugin)
+        mgr.load_tools(["read"])
+
+        messages, large_content, _ = _build_conversation_with_tool_calls()
+        ctx = AgentContext(user_query="test", messages=messages)
+
+        # Close
+        tc = {"name": "unload_tools", "input": {"names": ["read"]}, "id": "tu_u"}
+        plugin.after_action(ctx, tc, "Unloaded tools: read")
+        assert "tu_001" in ctx.metadata.get("_compressed_results", {})
+
+        # Re-open
+        tc = {"name": "load_tools", "input": {"names": ["read"]}, "id": "tu_l"}
+        plugin.after_action(ctx, tc, "Loaded tools: read")
+
+        # Store should be cleaned
+        assert "tu_001" not in ctx.metadata.get("_compressed_results", {})
+
+    def test_small_results_not_in_compressed_store(self):
+        """Small results that weren't compressed should not be in the store."""
+        from tool_registry import ToolRegistryPlugin
+        mgr = SkillPluginManager()
+        mgr.register(DeferredPlugin())
+        plugin = ToolRegistryPlugin(mgr)
+        mgr.register(plugin)
+        mgr.load_tools(["read"])
+
+        messages = [
+            {"role": "user", "content": "test"},
+            {"role": "assistant", "content": [
+                _make_tool_use_block("tu_tiny", "read", {"file_path": "tiny.txt"}),
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tu_tiny", "content": "short"},
+            ]},
+        ]
+        ctx = AgentContext(user_query="test", messages=messages)
+
+        tc = {"name": "unload_tools", "input": {"names": ["read"]}, "id": "tu_u"}
+        plugin.after_action(ctx, tc, "Unloaded tools: read")
+
+        # Small content not compressed, so not in store
+        assert "tu_tiny" not in ctx.metadata.get("_compressed_results", {})
