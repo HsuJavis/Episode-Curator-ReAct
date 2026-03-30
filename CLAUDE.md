@@ -465,6 +465,18 @@ def is_deferred(self) -> bool:
 
 **on_agent_start**：將 deferred 工具目錄注入 `system_prompt_extra`。
 
+**Close Book — Context 壓縮**：
+
+`unload_tools` 不只移除 schema，還會掃描 `ctx.messages` 壓縮對應工具的 `tool_result` 內容：
+
+1. 建立 `tool_use_id → tool_name` 映射表（從 assistant messages 的 tool_use blocks）
+2. 掃描 user messages 的 tool_result blocks，找到對應的已卸載工具
+3. 若 content > 200 chars，壓縮為：`[{tool_name} result compressed] {前100字}... ({原始長度} chars — use load_tools to re-expand)`
+4. 小於門檻的 result 不壓縮（overhead 不值得）
+5. 不影響非目標工具的 result，不影響純文字訊息
+
+觸發時機：`after_action` hook 偵測到 `unload_tools` 完成後自動執行。
+
 **_react_loop 變更**：每次迭代呼叫 `get_active_tool_definitions()` 而非靜態 tools 列表，支援動態載入。
 
 **Deferred 插件**：SystemToolsPlugin 和 MCPPlugin 的 `is_deferred()` 回傳 True。
@@ -690,6 +702,7 @@ pip install anthropic
 15. **長對話記憶 recall rate**：seed 5 個 episode 後，search recall rate ≥ 80%，LLM 能正確 recall ≥ 2/3 主題
 16. **MCP + Skill 相容性**：MCP 工具 deferred、load/unload/execute 正常、與 system tools 無衝突、skill catalog 在 load/unload cycle 後穩定
 17. **Session restart recall rate**：episodes/facts 跨 session 持久化，新 session 搜尋 recall ≥ 67%，新 agent 注入舊 context，LLM 跨 session recall ≥ 2/3
+18. **Close-book context 壓縮**：unload_tools 壓縮 tool_result 內容，保留 metadata，不影響非目標工具，小 result 不壓縮
 
 ## Progress
 
@@ -711,7 +724,7 @@ pip install anthropic
 | 13 | Hook Manager (PreToolUse/PostToolUse/Stop) | DONE | 22 | — |
 | 14 | MCP Client (JSON-RPC over stdio) | DONE | 16 | — |
 | 15 | Skill Loader (SKILL.md frontmatter) | DONE | 14 | — |
-| 16 | Dynamic Tool Loading (Open/Close Book) | DONE | 29 | `0f2750c` |
+| 16 | Dynamic Tool Loading (Open/Close Book) | DONE | 36 | `0f2750c` |
 | 17 | TUI E2E — tool/skill loading + memory recall + MCP compat + session restart | DONE | 25 (5 真實 API) | — |
 
 ### Spec 測試覆蓋對照
@@ -735,4 +748,5 @@ pip install anthropic
 | 15 | 長對話記憶 recall rate | `test_tui_e2e.py::TestLongConversationRecall` | PASS |
 | 16 | MCP + Skill 相容性 | `test_tui_e2e.py::TestMCPAndSkillCompatibility` | PASS |
 | 17 | Session restart recall rate | `test_tui_e2e.py::TestSessionRestartRecall` | PASS |
+| 18 | Close-book context 壓縮 | `test_tool_registry.py::TestCloseBookCompression` | PASS |
 
