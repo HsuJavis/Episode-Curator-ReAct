@@ -655,7 +655,7 @@ class EpisodeCuratorApp(App):
         else:
             # Show this category
             self._detail_showing = category
-            detail.border_title = f"◈ {category.upper()} Detail (Ctrl+D/T/M)"
+            detail.border_title = f"◈ {category.upper()} Detail (Ctrl+D/T/B)"
             detail.update_detail(category, self._context_contents.get(category, "(no data yet)"))
             detail.add_class("detail-visible")
 
