@@ -8,6 +8,7 @@ import pytest
 from textual.widgets import Input
 
 from cli_app import (
+    ContextDetailPanel,
     ContextUsagePanel,
     EpisodeCuratorApp,
     EpisodeSummaryPanel,
@@ -620,16 +621,239 @@ class TestTUIPlugin:
         plugin.on_token_usage(ctx, 2000, 400)
 
         status_events = [e for e in events if e.kind == "status"]
-        assert len(status_events) == 1
+        assert len(status_events) >= 1
         data = status_events[0].data
         assert data["iteration"] == 1
-        assert data["input_tokens"] == 2000
+        assert data["input_tokens"] >= 2000  # cumulative
         assert "context" in data
         assert "system" in data["context"]
         assert "tools" in data["context"]
         assert "messages" in data["context"]
         # messages = 2000 - system_est - 300 (tool_tokens)
         assert data["context"]["messages"] >= 0
+
+
+# ============================================================
+# Streaming + Status Turn Counter + Context Detail
+# ============================================================
+
+
+class TestStreamingEvents:
+    """TUIPlugin should emit stream_delta events and suppress duplicate on_thought."""
+
+    def test_stream_delta_emitted(self):
+        plugin = TUIPlugin()
+        events = []
+        plugin.set_callback(lambda e: events.append(e))
+
+        ctx = AgentContext(user_query="test")
+        plugin.on_stream_delta(ctx, "Hello ")
+        plugin.on_stream_delta(ctx, "world")
+
+        deltas = [e for e in events if e.kind == "stream_delta"]
+        assert len(deltas) == 2
+        assert deltas[0].data["text"] == "Hello "
+        assert deltas[1].data["text"] == "world"
+
+    def test_thought_suppressed_after_streaming(self):
+        """on_thought should NOT emit when text was already streamed."""
+        plugin = TUIPlugin()
+        events = []
+        plugin.set_callback(lambda e: events.append(e))
+
+        ctx = AgentContext(user_query="test")
+        # Stream some text first
+        plugin.on_stream_delta(ctx, "Let me think...")
+        # Now on_thought fires with the same text — should be suppressed
+        plugin.on_thought(ctx, "Let me think...")
+
+        thoughts = [e for e in events if e.kind == "thought"]
+        assert len(thoughts) == 0  # suppressed because we streamed
+
+    def test_thought_emitted_when_not_streaming(self):
+        """on_thought should still emit when no streaming happened."""
+        plugin = TUIPlugin()
+        events = []
+        plugin.set_callback(lambda e: events.append(e))
+
+        ctx = AgentContext(user_query="test")
+        plugin.on_thought(ctx, "Thinking normally")
+
+        thoughts = [e for e in events if e.kind == "thought"]
+        assert len(thoughts) == 1
+
+    def test_stream_flag_resets_on_token_usage(self):
+        """After on_token_usage, streaming flag resets for next iteration."""
+        plugin = TUIPlugin()
+        events = []
+        plugin.set_callback(lambda e: events.append(e))
+        plugin._system_base_tokens = 100
+        plugin._tool_tokens = 50
+
+        ctx = AgentContext(user_query="test")
+        ctx.start_time = time.time()
+        ctx.iteration = 1
+
+        # Stream some text
+        plugin.on_stream_delta(ctx, "hello")
+        assert plugin._streamed_current is True
+
+        # Token usage fires — should reset flag
+        plugin.on_token_usage(ctx, 500, 100)
+        assert plugin._streamed_current is False
+
+        # Now on_thought should work again
+        plugin.on_thought(ctx, "New thought")
+        thoughts = [e for e in events if e.kind == "thought"]
+        assert len(thoughts) == 1
+
+
+class TestStatusTurnCounter:
+    """Status bar should track cumulative turns across multiple run() calls."""
+
+    def test_turn_increments_on_agent_start(self):
+        plugin = TUIPlugin()
+        events = []
+        plugin.set_callback(lambda e: events.append(e))
+
+        ctx1 = AgentContext(user_query="first")
+        plugin.on_agent_start(ctx1)
+        assert plugin._total_turns == 1
+
+        ctx2 = AgentContext(user_query="second")
+        plugin.on_agent_start(ctx2)
+        assert plugin._total_turns == 2
+
+    def test_turn_in_status_event(self):
+        plugin = TUIPlugin()
+        events = []
+        plugin.set_callback(lambda e: events.append(e))
+
+        ctx = AgentContext(user_query="test")
+        plugin.on_agent_start(ctx)
+
+        status_events = [e for e in events if e.kind == "status"]
+        assert status_events[0].data["turn"] == 1
+
+    def test_cumulative_tokens_across_runs(self):
+        plugin = TUIPlugin()
+        events = []
+        plugin.set_callback(lambda e: events.append(e))
+        plugin._system_base_tokens = 100
+        plugin._tool_tokens = 50
+
+        # First run
+        ctx1 = AgentContext(user_query="q1")
+        ctx1.start_time = time.time()
+        ctx1.iteration = 1
+        plugin.on_agent_start(ctx1)
+        plugin.on_token_usage(ctx1, 1000, 200)
+
+        # Second run
+        ctx2 = AgentContext(user_query="q2")
+        ctx2.start_time = time.time()
+        ctx2.iteration = 1
+        plugin.on_agent_start(ctx2)
+        plugin.on_token_usage(ctx2, 800, 150)
+
+        status_events = [e for e in events if e.kind == "status"]
+        last_status = status_events[-1].data
+        assert last_status["input_tokens"] == 1800  # 1000 + 800
+        assert last_status["output_tokens"] == 350   # 200 + 150
+        assert last_status["turn"] == 2
+
+    def test_status_bar_renders_turn(self):
+        """StatusBar should display the turn counter."""
+        bar = StatusBar()
+        bar.turn = 5
+        bar.iteration = 2
+        bar.max_iterations = 30
+        rendered = bar.render()
+        assert "turn 5" in rendered
+        assert "iter 2/30" in rendered
+
+
+class TestContextDetailPanel:
+    """Context detail panel toggles visibility with keybindings."""
+
+    @pytest.fixture
+    def app(self):
+        return EpisodeCuratorApp()
+
+    @pytest.mark.asyncio
+    async def test_detail_panel_exists_hidden(self, app):
+        """Context detail panel should exist but be hidden by default."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            detail = app.query_one("#context-detail")
+            assert detail is not None
+            assert "detail-visible" not in detail.classes
+
+    @pytest.mark.asyncio
+    async def test_toggle_system_detail(self, app):
+        """Ctrl+D should toggle system context detail."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            detail = app.query_one("#context-detail")
+
+            # Toggle on
+            app.action_toggle_detail_system()
+            await pilot.pause()
+            assert "detail-visible" in detail.classes
+            assert app._detail_showing == "system"
+
+            # Toggle off
+            app.action_toggle_detail_system()
+            await pilot.pause()
+            assert "detail-visible" not in detail.classes
+            assert app._detail_showing == ""
+
+    @pytest.mark.asyncio
+    async def test_toggle_switches_category(self, app):
+        """Pressing a different toggle should switch category, not just toggle off."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            detail = app.query_one("#context-detail")
+
+            app.action_toggle_detail_system()
+            await pilot.pause()
+            assert app._detail_showing == "system"
+
+            # Switch to tools
+            app.action_toggle_detail_tools()
+            await pilot.pause()
+            assert app._detail_showing == "tools"
+            assert "detail-visible" in detail.classes
+
+    @pytest.mark.asyncio
+    async def test_stream_widget_exists(self, app):
+        """Stream output widget should exist in conversation panel."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            stream = app.query_one("#stream-output")
+            assert stream is not None
+            assert "streaming" not in stream.classes
+
+    @pytest.mark.asyncio
+    async def test_stream_delta_shows_in_widget(self, app):
+        """stream_delta event should update the stream output widget."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            from textual.widgets import Static
+            stream = app.query_one("#stream-output", Static)
+            app._handle_event(TUIEvent("stream_delta", {"text": "Hello "}))
+            app._handle_event(TUIEvent("stream_delta", {"text": "world"}))
+            await pilot.pause()
+            assert "streaming" in stream.classes
+
+    @pytest.mark.asyncio
+    async def test_stream_cleared_on_answer(self, app):
+        """Answer event should clear stream buffer and hide widget."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            from textual.widgets import Static
+            stream = app.query_one("#stream-output", Static)
+            app._handle_event(TUIEvent("stream_delta", {"text": "streaming..."}))
+            await pilot.pause()
+            assert "streaming" in stream.classes
+
+            app._handle_event(TUIEvent("answer", {"text": "Final answer"}))
+            await pilot.pause()
+            assert "streaming" not in stream.classes
 
 
 # ============================================================
