@@ -102,7 +102,6 @@ class TUIPlugin(SkillPlugin):
         elapsed = time.time() - ctx.start_time if ctx.start_time else 0.0
         self._cumulative_input_tokens += input_tokens
         self._cumulative_output_tokens += output_tokens
-        self._streamed_current = False  # reset for next iteration
 
         # Estimate context breakdown
         extra = ctx.metadata.get("system_prompt_extra", "")

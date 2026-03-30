@@ -682,8 +682,8 @@ class TestStreamingEvents:
         thoughts = [e for e in events if e.kind == "thought"]
         assert len(thoughts) == 1
 
-    def test_stream_flag_resets_on_token_usage(self):
-        """After on_token_usage, streaming flag resets for next iteration."""
+    def test_stream_flag_persists_through_token_usage(self):
+        """_streamed_current stays True through on_token_usage so on_thought is suppressed."""
         plugin = TUIPlugin()
         events = []
         plugin.set_callback(lambda e: events.append(e))
@@ -698,12 +698,32 @@ class TestStreamingEvents:
         plugin.on_stream_delta(ctx, "hello")
         assert plugin._streamed_current is True
 
-        # Token usage fires — should reset flag
+        # Token usage fires — flag should NOT reset (thought comes after)
         plugin.on_token_usage(ctx, 500, 100)
+        assert plugin._streamed_current is True
+
+        # on_thought should be suppressed (text was already streamed)
+        plugin.on_thought(ctx, "Same text")
+        thoughts = [e for e in events if e.kind == "thought"]
+        assert len(thoughts) == 0
+
+    def test_stream_flag_resets_on_new_run(self):
+        """_streamed_current resets on on_agent_start (new run)."""
+        plugin = TUIPlugin()
+        events = []
+        plugin.set_callback(lambda e: events.append(e))
+
+        ctx1 = AgentContext(user_query="q1")
+        plugin.on_stream_delta(ctx1, "hello")
+        assert plugin._streamed_current is True
+
+        # New run resets
+        ctx2 = AgentContext(user_query="q2")
+        plugin.on_agent_start(ctx2)
         assert plugin._streamed_current is False
 
-        # Now on_thought should work again
-        plugin.on_thought(ctx, "New thought")
+        # on_thought works in new run
+        plugin.on_thought(ctx2, "Fresh thought")
         thoughts = [e for e in events if e.kind == "thought"]
         assert len(thoughts) == 1
 
