@@ -790,6 +790,7 @@ class EpisodeCuratorPlugin(SkillPlugin):
             self._store.add_facts(result["facts"])
 
         # Rebuild ctx.messages — maintain user/assistant alternation
+        old_count = len(ctx.messages)
         global_index = self._store.build_global_index()
         ctx.messages = [
             first_msg,
@@ -802,6 +803,8 @@ class EpisodeCuratorPlugin(SkillPlugin):
             ]},
             *to_keep,
         ]
+        logger.info("curator.compressed | msgs_before=%d msgs_after=%d archived=%d kept=%d episodes_total=%d",
+                     old_count, len(ctx.messages), len(to_archive), len(to_keep), len(self._store._index))
 
         # Update system_prompt_extra
         parts = []
