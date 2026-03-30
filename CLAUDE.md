@@ -727,6 +727,7 @@ pip install anthropic
 21. **Status turn 累計**：turn 跨 run() 累加、cumulative tokens、StatusBar 顯示 turn
 22. **Context detail panel**：Ctrl+D/T/M 切換 system/tools/msgs 內容、預設隱藏、切換 category
 23. **Stream widget**：stream-output widget 存在、stream_delta 更新 widget、answer 清除 stream
+24. **TUI Full Pipeline**：TUI input → agent → load_tools → read → answer 完整鏈路、多工具鏈（load→grep→read）、context detail 在 tool 呼叫後顯示 messages
 
 ## Progress
 
@@ -749,7 +750,7 @@ pip install anthropic
 | 14 | MCP Client (JSON-RPC over stdio) | DONE | 16 | — |
 | 15 | Skill Loader (SKILL.md frontmatter) | DONE | 14 | — |
 | 16 | Dynamic Tool Loading (Open/Close Book + Re-expand) | DONE | 42 | `0f2750c` |
-| 17 | TUI E2E — tool/skill loading + memory recall + MCP compat + session restart | DONE | 26 (6 真實 API) | — |
+| 17 | TUI E2E — tool/skill loading + memory recall + MCP compat + session restart + full pipeline | DONE | 29 (9 真實 API) | — |
 
 ### Spec 測試覆蓋對照
 
@@ -778,4 +779,5 @@ pip install anthropic
 | 21 | Status turn 累計 | `test_cli_tui.py::TestStatusTurnCounter` | PASS |
 | 22 | Context detail panel | `test_cli_tui.py::TestContextDetailPanel` | PASS |
 | 23 | Stream widget | `test_cli_tui.py::TestContextDetailPanel` | PASS |
+| 24 | TUI Full Pipeline | `test_tui_e2e.py::TestTUIFullPipeline` | PASS |
 

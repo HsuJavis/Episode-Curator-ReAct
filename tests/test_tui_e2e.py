@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from react_agent import AgentContext, ReActAgent, SkillPlugin, SkillPluginManager
+from textual.widgets import Input
 from cli_app import EpisodeCuratorApp, TUIEvent, TUIPlugin, StatusBar
 from episode_curator import EpisodeStore, Curator, EpisodeCuratorPlugin, create_agent
 from tool_registry import ToolRegistryPlugin
@@ -723,3 +724,171 @@ class TestSessionRestartRecall:
             hits += 1
 
         assert hits >= 2, f"Cross-session recall: {hits}/3 topics (need >= 2)"
+
+
+# ============================================================
+# 5. TUI Full Pipeline — input → agent → tool calls → answer
+# ============================================================
+
+
+class TestTUIFullPipeline:
+    """E2E: submit message through TUI input, agent calls tools, answer appears in log."""
+
+    @staticmethod
+    def _setup_agent_and_app(api_key, system_prompt, max_iterations=10):
+        """Build agent with system tools + registry, wire TUIPlugin callback to BOTH app and events_log."""
+        import json as _json
+
+        agent = ReActAgent(
+            model="claude-haiku-4-5-20251001",
+            max_iterations=max_iterations,
+            api_key=api_key,
+            system_prompt=system_prompt,
+        )
+        mgr = agent._manager
+        mgr.register(SystemToolsPlugin())
+        mgr.register(ToolRegistryPlugin(mgr))
+
+        events_log: list[TUIEvent] = []
+        tui_plugin = TUIPlugin()
+        tui_plugin._max_iterations = agent.max_iterations
+
+        # Estimate static tokens (same as _init_agent)
+        from cli_app import _estimate_tokens
+        tui_plugin._system_base_tokens = _estimate_tokens(agent.system_prompt)
+        tui_plugin._tool_tokens = _estimate_tokens(_json.dumps(mgr.get_all_tool_definitions()))
+
+        app = EpisodeCuratorApp(agent=agent)
+        app._tui_plugin = tui_plugin
+
+        # Dual callback: log events + dispatch to app
+        def dual_callback(event: TUIEvent):
+            events_log.append(event)
+            app.call_from_thread(app._handle_event, event)
+
+        tui_plugin.set_callback(dual_callback)
+        agent.register_skill(tui_plugin)
+
+        return agent, app, events_log
+
+    @pytest.mark.tui
+    @pytest.mark.llm
+    @pytest.mark.asyncio
+    async def test_tui_tool_call_pipeline(self, api_key, tmp_path):
+        """Full TUI pipeline: user types → agent loads tools → reads file → answers."""
+        import asyncio
+
+        test_file = tmp_path / "secret.txt"
+        test_file.write_text("The launch code is ALPHA-7.", encoding="utf-8")
+
+        agent, app, events_log = self._setup_agent_and_app(
+            api_key,
+            "You have deferred tools. Use load_tools to activate tools, then use them to answer questions.",
+        )
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            inp = app.query_one("#user-input", Input)
+            inp.value = f"Read {test_file} and tell me the launch code."
+            await inp.action_submit()
+
+            status = app.query_one("#status-bar", StatusBar)
+            for _ in range(60):
+                await asyncio.sleep(0.5)
+                if not status.busy:
+                    break
+
+            # Verify tool call events were emitted
+            action_events = [e for e in events_log if e.kind == "action"]
+            assert len(action_events) >= 1, "Expected at least one tool call"
+
+            tool_names = {e.data.get("tool") for e in action_events}
+            assert "load_tools" in tool_names, f"Expected load_tools call, got {tool_names}"
+            assert "read" in tool_names, f"Expected read call, got {tool_names}"
+
+            # Verify observation events (tool results)
+            obs_events = [e for e in events_log if e.kind == "observation"]
+            assert len(obs_events) >= 1, "Expected at least one observation"
+
+            # Verify answer
+            answer_events = [e for e in events_log if e.kind == "answer"]
+            assert len(answer_events) == 1, "Expected exactly one answer"
+            assert "ALPHA-7" in answer_events[0].data.get("text", ""), \
+                f"Answer should contain launch code, got: {answer_events[0].data.get('text', '')[:100]}"
+
+            # Verify status bar updated via app
+            assert status.turn >= 1
+            assert status.input_tokens > 0
+
+    @pytest.mark.tui
+    @pytest.mark.llm
+    @pytest.mark.asyncio
+    async def test_tui_multi_tool_chain(self, api_key, tmp_path):
+        """TUI pipeline: agent chains multiple tools — load → grep/search → read → answer."""
+        import asyncio
+
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "config.py").write_text("DB_HOST = 'pg.example.com'\nDB_PORT = 5432\n", encoding="utf-8")
+        (src / "app.py").write_text("import config\nprint(config.DB_HOST)\n", encoding="utf-8")
+
+        agent, app, events_log = self._setup_agent_and_app(
+            api_key,
+            "You have deferred tools. Use load_tools first. Search for the database host in the source files.",
+            max_iterations=12,
+        )
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            inp = app.query_one("#user-input", Input)
+            inp.value = f"Find the database host in {src}. Search files first, then read the config."
+            await inp.action_submit()
+
+            status = app.query_one("#status-bar", StatusBar)
+            for _ in range(60):
+                await asyncio.sleep(0.5)
+                if not status.busy:
+                    break
+
+            action_events = [e for e in events_log if e.kind == "action"]
+            assert len(action_events) >= 2, f"Expected multiple tool calls, got {len(action_events)}"
+
+            answer_events = [e for e in events_log if e.kind == "answer"]
+            assert len(answer_events) == 1
+            answer_text = answer_events[0].data.get("text", "")
+            assert "pg.example.com" in answer_text or "5432" in answer_text, \
+                f"Answer should contain DB info, got: {answer_text[:150]}"
+
+    @pytest.mark.tui
+    @pytest.mark.llm
+    @pytest.mark.asyncio
+    async def test_tui_context_detail_after_tool_call(self, api_key, tmp_path):
+        """After tool calls, Ctrl+B should show messages with tool interactions."""
+        import asyncio
+
+        test_file = tmp_path / "note.txt"
+        test_file.write_text("Remember: meeting at 3pm.", encoding="utf-8")
+
+        agent, app, events_log = self._setup_agent_and_app(
+            api_key,
+            "You have deferred tools. Use load_tools to activate, then use them.",
+        )
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            inp = app.query_one("#user-input", Input)
+            inp.value = f"Read {test_file} and summarize it."
+            await inp.action_submit()
+
+            status = app.query_one("#status-bar", StatusBar)
+            for _ in range(60):
+                await asyncio.sleep(0.5)
+                if not status.busy:
+                    break
+
+            # Toggle msgs detail
+            app.action_toggle_detail_msgs()
+            await pilot.pause()
+
+            from cli_app import ContextDetailPanel
+            detail = app.query_one("#context-detail", ContextDetailPanel)
+            assert "detail-visible" in detail.classes
+            msgs = app._context_contents.get("msgs", "")
+            assert len(msgs) > 10, f"Expected msgs content, got: {msgs[:50]}"
