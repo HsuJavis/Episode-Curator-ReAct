@@ -19,15 +19,22 @@ def main():
         help="Worker model (default: haiku, OAuth 支援；sonnet 需要 API key)",
     )
     parser.add_argument("--api-key", default=None, help="Anthropic API key")
-    parser.add_argument("--threshold", type=int, default=80000, help="壓縮門檻 tokens")
+    parser.add_argument("--threshold-pct", type=int, default=50,
+                        help="壓縮門檻百分比 (預設 50%% of context window)")
     args = parser.parse_args()
 
     worker_model = MODELS[args.model]
+
+    # Resolve context window and compute compression threshold
+    from cli_app import get_model_context_window
+    context_window = get_model_context_window(worker_model)
+    threshold = context_window * args.threshold_pct // 100
 
     print("=" * 50)
     print("  Episode Curator ReAct Agent — Interactive CLI")
     print("=" * 50)
     print(f"  Worker: {args.model} ({worker_model})")
+    print(f"  Context: {context_window // 1000}k | 壓縮門檻: {threshold // 1000}k ({args.threshold_pct}%)")
     print()
     print("指令：")
     print("  /episodes  — 查看已儲存的 episodes")
@@ -39,7 +46,7 @@ def main():
     agent = create_agent(
         worker_model=worker_model,
         curator_model="claude-haiku-4-5-20251001",
-        threshold=args.threshold,
+        threshold=threshold,
         max_iterations=15,
         api_key=args.api_key,
     )

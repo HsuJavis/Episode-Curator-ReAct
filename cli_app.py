@@ -21,6 +21,32 @@ from react_agent import AgentContext, SkillPlugin
 
 
 # ============================================================
+# Model Context Windows
+# ============================================================
+
+MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    "claude-haiku-4-5-20251001": 200_000,
+    "claude-sonnet-4-20250514": 200_000,
+    "claude-sonnet-4-6-20250627": 200_000,
+    "claude-opus-4-20250514": 200_000,
+    "claude-opus-4-6-20250724": 1_000_000,
+}
+
+DEFAULT_CONTEXT_WINDOW = 200_000
+
+
+def get_model_context_window(model: str) -> int:
+    """Return the context window size for a model name."""
+    if model in MODEL_CONTEXT_WINDOWS:
+        return MODEL_CONTEXT_WINDOWS[model]
+    # Prefix match for versioned model names
+    for name, window in MODEL_CONTEXT_WINDOWS.items():
+        if model.startswith(name.rsplit("-", 1)[0]):
+            return window
+    return DEFAULT_CONTEXT_WINDOW
+
+
+# ============================================================
 # TUIPlugin — Bridge ReAct hooks → Textual App
 # ============================================================
 
@@ -41,6 +67,8 @@ class TUIPlugin(SkillPlugin):
         self._cumulative_input_tokens: int = 0
         self._cumulative_output_tokens: int = 0
         self._total_turns: int = 0
+        self._get_tools_content: Callable[[], str] | None = None
+        self._get_active_tool_tokens: Callable[[], int] | None = None
 
     def set_callback(self, cb: Callable[[TUIEvent], None]):
         self._callback = cb
@@ -100,7 +128,10 @@ class TUIPlugin(SkillPlugin):
                     if isinstance(b, dict):
                         t = b.get("type", "?")
                         if t == "tool_result":
-                            parts.append(f"[tool_result:{b.get('tool_use_id','')}]")
+                            tu_id = b.get("tool_use_id", "")
+                            body = b.get("content", "")
+                            preview = body[:80] if isinstance(body, str) else str(body)[:80]
+                            parts.append(f"[tool_result:{tu_id}] {preview}")
                         else:
                             parts.append(f"[{t}]")
                     elif hasattr(b, "type"):
@@ -110,27 +141,33 @@ class TUIPlugin(SkillPlugin):
                             parts.append(f"[tool_use:{getattr(b, 'name', '?')}]")
                         else:
                             parts.append(f"[{b.type}]")
-                return {"role": role, "content": " | ".join(parts)[:200]}
+                return {"role": role, "content": " | ".join(parts)[:300]}
             return {"role": role, "content": str(content)[:200]}
 
         msgs_content = json.dumps(
             [_msg_preview(m) for m in ctx.messages[-10:]],
             ensure_ascii=False, indent=1,
         ) if ctx.messages else "[]"
+        # Build tools content with active/deferred status from agent manager
+        tools_content = ""
+        if self._get_tools_content:
+            tools_content = self._get_tools_content()
         self._emit("context_content",
                    system=system_content,
-                   msgs=msgs_content)
+                   msgs=msgs_content,
+                   tools=tools_content)
         elapsed = time.time() - ctx.start_time if ctx.start_time else 0.0
         self._cumulative_input_tokens += input_tokens
         self._cumulative_output_tokens += output_tokens
 
-        # Estimate context breakdown
+        # Estimate context breakdown — tool tokens reflect current active set
         extra = ctx.metadata.get("system_prompt_extra", "")
         system_est = _estimate_tokens(extra) + self._system_base_tokens
+        tool_est = self._get_active_tool_tokens() if self._get_active_tool_tokens else self._tool_tokens
         context = {
             "system": system_est,
-            "tools": self._tool_tokens,
-            "messages": max(0, input_tokens - system_est - self._tool_tokens),
+            "tools": tool_est,
+            "messages": max(0, input_tokens - system_est - tool_est),
         }
 
         cur_count = self._count_episodes()
@@ -179,35 +216,43 @@ def _estimate_tokens(text: str) -> int:
 # ============================================================
 
 class ContextUsagePanel(Widget):
-    """Displays context window token breakdown as horizontal gauges."""
+    """Displays context window token usage as a single stacked bar with color-coded segments."""
 
     system_tokens: reactive[int] = reactive(0)
     tool_tokens: reactive[int] = reactive(0)
     message_tokens: reactive[int] = reactive(0)
-    threshold: reactive[int] = reactive(80000)
+    threshold: reactive[int] = reactive(200000)
 
     def render(self) -> str:
         total = self.system_tokens + self.tool_tokens + self.message_tokens
-        if total == 0:
-            total = 1  # avoid div-by-zero
+        cap = max(self.threshold, 1)
+        usage_pct = total / cap
 
-        bar_width = 22
+        bar_width = 30
 
-        def gauge(label: str, value: int, color_char: str) -> str:
-            pct = value / total if total > 1 else 0
-            filled = int(pct * bar_width)
-            empty = bar_width - filled
-            bar = color_char * filled + "░" * empty
-            tok_str = _format_tokens(value)
-            return f" {label:<8} {bar} {tok_str:>6} ({pct:4.0%})"
+        # Calculate segment widths proportional to threshold
+        sys_w = int(self.system_tokens / cap * bar_width)
+        tool_w = int(self.tool_tokens / cap * bar_width)
+        msg_w = int(self.message_tokens / cap * bar_width)
+        # Fix rounding: ensure segments don't exceed bar
+        used_w = sys_w + tool_w + msg_w
+        if used_w > bar_width:
+            msg_w = max(0, msg_w - (used_w - bar_width))
+        empty_w = bar_width - sys_w - tool_w - msg_w
+
+        bar = "█" * sys_w + "▓" * tool_w + "▒" * msg_w + "░" * empty_w
+        pct_str = f"{usage_pct:.0%}"
+
+        # Category breakdown
+        def cat_line(label: str, value: int, marker: str) -> str:
+            pct = value / cap * 100 if cap > 1 else 0
+            return f"  {marker} {label:<7} {_format_tokens(value):>6}  {pct:4.1f}%"
 
         lines = [
-            " ┈ CONTEXT WINDOW ┈",
-            gauge("system", self.system_tokens, "█"),
-            gauge("tools", self.tool_tokens, "▓"),
-            gauge("msgs", self.message_tokens, "▒"),
-            f" {'─' * (bar_width + 20)}",
-            f" total    {_format_tokens(self.system_tokens + self.tool_tokens + self.message_tokens):>28} / {_format_tokens(self.threshold)}",
+            f" {bar} {_format_tokens(total):>6} / {_format_tokens(cap)} ({pct_str})",
+            cat_line("system", self.system_tokens, "█"),
+            cat_line("tools", self.tool_tokens, "▓"),
+            cat_line("msgs", self.message_tokens, "▒"),
         ]
         return "\n".join(lines)
 
@@ -427,11 +472,13 @@ class EpisodeCuratorApp(App):
         Binding("ctrl+b", "toggle_detail_msgs", "Msgs", show=True),
     ]
 
-    def __init__(self, agent=None, store=None, threshold: int = 80000, **kwargs):
+    def __init__(self, agent=None, store=None, threshold_pct: int = 50, **kwargs):
         super().__init__(**kwargs)
         self._agent = agent
         self._store = store
-        self._threshold = threshold
+        self._threshold_pct = threshold_pct  # compression threshold as % of context window
+        self._context_window: int = DEFAULT_CONTEXT_WINDOW  # updated in _init_agent
+        self._threshold = self._context_window * threshold_pct // 100  # compression threshold
         self._tui_plugin: TUIPlugin | None = None
         self._history: list[dict] = []
         self._context_contents: dict[str, str] = {"system": "", "tools": "", "msgs": ""}
@@ -465,7 +512,7 @@ class EpisodeCuratorApp(App):
         self.query_one("#episodes").border_title = "◈ Episodes"
 
         ctx_panel = self.query_one("#context-usage", ContextUsagePanel)
-        ctx_panel.threshold = self._threshold
+        ctx_panel.threshold = self._context_window
 
         # Load initial episodes
         self._refresh_episodes()
@@ -514,6 +561,17 @@ class EpisodeCuratorApp(App):
         worker_model = os.environ.get("WORKER_MODEL", "claude-haiku-4-5-20251001")
         curator_model = os.environ.get("CURATOR_MODEL", "claude-haiku-4-5-20251001")
 
+        # Resolve context window from model and compute compression threshold
+        self._context_window = get_model_context_window(worker_model)
+        self._threshold = self._context_window * self._threshold_pct // 100
+
+        # Update context panel with model's actual context window
+        try:
+            ctx_panel = self.query_one("#context-usage", ContextUsagePanel)
+            ctx_panel.threshold = self._context_window
+        except Exception:
+            pass
+
         self._agent = create_agent(
             worker_model=worker_model,
             curator_model=curator_model,
@@ -534,14 +592,13 @@ class EpisodeCuratorApp(App):
         self._tui_plugin._system_base_tokens = _estimate_tokens(sys_prompt)
         self._tui_plugin._tool_tokens = _estimate_tokens(_json.dumps(tools))
 
+        self._tui_plugin._get_tools_content = self._build_tools_content
+        self._tui_plugin._get_active_tool_tokens = self._calc_active_tool_tokens
         self._tui_plugin.set_callback(self._on_tui_event_from_thread)
         self._agent.register_skill(self._tui_plugin)
 
         # Populate initial tools content for detail panel
-        tools = self._agent._manager.get_all_tool_definitions()
-        self._context_contents["tools"] = f"Registered tools ({len(tools)}):\n" + "\n".join(
-            f"  - {t['name']}: {t.get('description', '')[:80]}" for t in tools
-        )
+        self._context_contents["tools"] = self._build_tools_content()
 
     def _on_tui_event_from_thread(self, event: TUIEvent):
         """Called from the agent thread — dispatch to main thread."""
@@ -593,6 +650,9 @@ class EpisodeCuratorApp(App):
         elif kind == "context_content":
             self._context_contents["system"] = data.get("system", "")
             self._context_contents["msgs"] = data.get("msgs", "")
+            tools_data = data.get("tools", "")
+            if tools_data:
+                self._context_contents["tools"] = tools_data
             # Update detail panel if visible
             if self._detail_showing:
                 detail = self.query_one("#context-detail", ContextDetailPanel)
@@ -655,15 +715,31 @@ class EpisodeCuratorApp(App):
     def action_toggle_detail_system(self):
         self._toggle_detail("system")
 
+    def _calc_active_tool_tokens(self) -> int:
+        """Estimate tokens for currently active tools only."""
+        if not self._agent:
+            return 0
+        active = self._agent._manager.get_active_tool_definitions()
+        return _estimate_tokens(json.dumps(active)) if active else 0
+
+    def _build_tools_content(self) -> str:
+        """Build tools panel content with active/deferred status."""
+        if not self._agent:
+            return "(agent not initialized)"
+        catalog = self._agent._manager.get_tool_catalog()
+        active = [t for t in catalog if t["loaded"]]
+        deferred = [t for t in catalog if not t["loaded"]]
+        lines = [f"Active tools ({len(active)}):"]
+        for t in active:
+            lines.append(f"  [✓] {t['name']}: {t['description'][:80]}")
+        lines.append(f"\nDeferred tools ({len(deferred)}):")
+        for t in deferred:
+            lines.append(f"  [·] {t['name']}: {t['description'][:80]}")
+        return "\n".join(lines)
+
     def action_toggle_detail_tools(self):
-        # Build tools content from agent if available
         if self._agent:
-            import json as _json
-            tools = self._agent._manager.get_all_tool_definitions()
-            names = [t["name"] for t in tools]
-            self._context_contents["tools"] = f"Registered tools ({len(names)}):\n" + "\n".join(
-                f"  - {t['name']}: {t.get('description', '')[:80]}" for t in tools
-            )
+            self._context_contents["tools"] = self._build_tools_content()
         self._toggle_detail("tools")
 
     def action_toggle_detail_msgs(self):

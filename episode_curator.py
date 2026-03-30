@@ -857,20 +857,36 @@ class EpisodeCuratorPlugin(SkillPlugin):
 def create_agent(
     worker_model: str = "claude-sonnet-4-20250514",
     curator_model: str = "claude-haiku-4-5-20251001",
-    threshold: int = 80000,
+    threshold: int = 100_000,  # 50% of 200k default context window
     max_iterations: int = 30,
     storage_dir: str | None = None,
     api_key: str | None = None,
 ) -> ReActAgent:
-    """Create a ReActAgent with the EpisodeCuratorPlugin pre-configured."""
+    """Create a ReActAgent with all standard plugins pre-configured."""
+    from system_tools import SystemToolsPlugin
+    from tool_registry import ToolRegistryPlugin
+    from skill_loader import SkillManager, SkillLoaderPlugin
+
     store = EpisodeStore(storage_dir)
     curator = Curator(api_key=api_key, model=curator_model)
-    plugin = EpisodeCuratorPlugin(store, curator, threshold=threshold)
+    ep_plugin = EpisodeCuratorPlugin(store, curator, threshold=threshold)
+    sys_plugin = SystemToolsPlugin()
 
     agent = ReActAgent(
         model=worker_model,
         max_iterations=max_iterations,
         api_key=api_key,
     )
-    agent.register_skill(plugin)
+    agent.register_skill(ep_plugin)
+    agent.register_skill(sys_plugin)
+
+    # SkillLoaderPlugin — inject skill catalog into system prompt
+    skill_mgr = SkillManager()
+    skill_plugin = SkillLoaderPlugin(skill_mgr)
+    agent.register_skill(skill_plugin)
+
+    # ToolRegistryPlugin needs the manager reference
+    registry_plugin = ToolRegistryPlugin(agent._manager)
+    agent.register_skill(registry_plugin)
+
     return agent

@@ -20,10 +20,10 @@ class TestPluginRegistration:
         plugin = SystemToolsPlugin()
         assert plugin.name == "system_tools"
 
-    def test_get_tools_returns_6_tools(self):
+    def test_get_tools_returns_20_tools(self):
         plugin = SystemToolsPlugin()
         tools = plugin.get_tools()
-        assert len(tools) == 6
+        assert len(tools) == 20
 
     def test_all_tools_have_required_schema_keys(self):
         plugin = SystemToolsPlugin()
@@ -36,14 +36,21 @@ class TestPluginRegistration:
     def test_tool_names_are_correct(self):
         plugin = SystemToolsPlugin()
         names = {t["name"] for t in plugin.get_tools()}
-        assert names == {"read", "write", "grep", "search", "bash", "web_search"}
+        expected = {
+            "read", "write", "grep", "search", "bash", "web_search",
+            "web_fetch", "task_create", "task_get", "task_list",
+            "task_update", "task_stop", "task_output", "task_delete",
+            "process_spawn", "process_kill", "process_list", "process_status",
+            "system_info", "execute_skill",
+        }
+        assert names == expected
 
     def test_registers_with_plugin_manager(self):
         mgr = SkillPluginManager()
         plugin = SystemToolsPlugin()
         mgr.register(plugin)
         all_tools = mgr.get_all_tool_definitions()
-        assert len(all_tools) == 6
+        assert len(all_tools) == 20
 
     def test_no_conflict_with_episode_curator(self):
         from episode_curator import EpisodeStore, Curator, EpisodeCuratorPlugin

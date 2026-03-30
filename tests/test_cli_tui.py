@@ -125,11 +125,10 @@ class TestWidgetLayout:
 
     @pytest.mark.asyncio
     async def test_initial_context_panel_renders(self, app):
-        """Context usage panel should render with CONTEXT WINDOW header."""
+        """Context usage panel should render with stacked bar and categories."""
         async with app.run_test(size=(120, 40)) as pilot:
             ctx = app.query_one("#context-usage", ContextUsagePanel)
             rendered = ctx.render()
-            assert "CONTEXT WINDOW" in rendered
             assert "system" in rendered
             assert "tools" in rendered
             assert "msgs" in rendered
@@ -336,17 +335,20 @@ class TestContextUsagePanel:
 
     @pytest.mark.asyncio
     async def test_context_panel_shows_percentages(self, app):
-        """Rendered panel should include percentage labels."""
+        """Rendered panel should include percentage labels relative to threshold."""
         async with app.run_test(size=(120, 40)) as pilot:
             ctx = app.query_one("#context-usage", ContextUsagePanel)
             ctx.system_tokens = 2000
             ctx.tool_tokens = 1000
             ctx.message_tokens = 7000
+            ctx.threshold = 80000
 
             rendered = ctx.render()
-            assert "20%" in rendered   # system 2k/10k
-            assert "10%" in rendered   # tools 1k/10k
-            assert "70%" in rendered   # msgs 7k/10k
+            # Percentages are relative to threshold (80k), not total (10k)
+            assert "2.5%" in rendered   # system 2k/80k
+            assert "1.2%" in rendered   # tools 1k/80k
+            assert "8.8%" in rendered   # msgs 7k/80k
+            assert "12%" in rendered    # total 10k/80k
 
     @pytest.mark.asyncio
     async def test_context_threshold_display(self, app):
