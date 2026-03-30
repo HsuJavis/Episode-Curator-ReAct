@@ -117,10 +117,9 @@ class TestToolCatalogPlacement:
 class TestToolsPanelReflectsLoadState:
     """Ctrl+T tools panel should show which tools are active vs deferred."""
 
-    def test_build_tools_content_shows_status(self):
-        """_build_tools_content should show [✓] active and [·] deferred tools."""
+    def test_build_tools_content_shows_only_active(self):
+        """_build_tools_content should show only active tools."""
         app = EpisodeCuratorApp()
-        # Simulate agent with manager
         from unittest.mock import MagicMock
         mock_agent = MagicMock()
         mock_agent._manager = SkillPluginManager()
@@ -130,13 +129,13 @@ class TestToolsPanelReflectsLoadState:
         app._agent = mock_agent
 
         content = app._build_tools_content()
-        assert "[✓]" in content  # load_tools/unload_tools are active
-        assert "[·]" in content  # system tools are deferred
-        assert "Active tools" in content
-        assert "Deferred" in content
+        assert "load_tools" in content   # active
+        assert "unload_tools" in content # active
+        # deferred tools should NOT appear
+        assert "web_search" not in content
 
     def test_build_tools_content_after_load(self):
-        """After loading tools, they should move from [·] to [✓]."""
+        """After loading, tool appears in panel."""
         app = EpisodeCuratorApp()
         from unittest.mock import MagicMock
         mock_agent = MagicMock()
@@ -146,18 +145,15 @@ class TestToolsPanelReflectsLoadState:
         mock_agent._manager.register(registry)
         app._agent = mock_agent
 
-        # Before load
         content_before = app._build_tools_content()
-        assert "[·] read:" in content_before
+        assert "read" not in content_before
 
-        # Load read
         mock_agent._manager.load_tools(["read"])
         content_after = app._build_tools_content()
-        assert "[✓] read:" in content_after
-        assert "[·] read:" not in content_after
+        assert "read" in content_after
 
     def test_build_tools_content_after_unload(self):
-        """After unloading, tools should go back to [·]."""
+        """After unloading, tool disappears from panel."""
         app = EpisodeCuratorApp()
         from unittest.mock import MagicMock
         mock_agent = MagicMock()
@@ -171,8 +167,8 @@ class TestToolsPanelReflectsLoadState:
         mock_agent._manager.unload_tools(["read"])
 
         content = app._build_tools_content()
-        assert "[·] read:" in content  # unloaded
-        assert "[✓] bash:" in content  # still loaded
+        assert "read:" not in content  # unloaded, gone
+        assert "bash" in content       # still there
 
 
 # ============================================================

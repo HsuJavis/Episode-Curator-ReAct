@@ -147,12 +147,10 @@ class TUIPlugin(SkillPlugin):
                 return {"role": role, "content": " | ".join(parts)[:300]}
             return {"role": role, "content": str(content)[:200]}
 
-        # Show ALL messages in ctx.messages — this IS what's sent to the API
         msgs_content = json.dumps(
             [_msg_preview(m) for m in ctx.messages],
             ensure_ascii=False, indent=1,
         ) if ctx.messages else "[]"
-        msgs_content = f"({len(ctx.messages)} messages in context)\n{msgs_content}"
         # Build tools content: show what's actually sent to API this call
         tools_content = ""
         if self._get_tools_content:
@@ -781,18 +779,13 @@ class EpisodeCuratorApp(App):
         return _estimate_tokens(json.dumps(active)) if active else 0
 
     def _build_tools_content(self) -> str:
-        """Build tools panel: active tools sent to API + deferred catalog."""
+        """Build tools panel: only active tools sent to API."""
         if not self._agent:
             return "(agent not initialized)"
-        catalog = self._agent._manager.get_tool_catalog()
-        active = [t for t in catalog if t["loaded"]]
-        deferred = [t for t in catalog if not t["loaded"]]
-        lines = [f"Active tools sent to API ({len(active)}):"]
+        active = self._agent._manager.get_active_tool_definitions()
+        lines = []
         for t in active:
-            lines.append(f"  [✓] {t['name']}: {t['description'][:80]}")
-        lines.append(f"\nDeferred — not in API context ({len(deferred)}):")
-        for t in deferred:
-            lines.append(f"  [·] {t['name']}: {t['description'][:80]}")
+            lines.append(f"  {t['name']}: {t.get('description', '')[:80]}")
         return "\n".join(lines)
 
     def action_toggle_detail_tools(self):
