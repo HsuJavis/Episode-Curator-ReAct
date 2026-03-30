@@ -67,6 +67,32 @@ class TestWidgetLayout:
             assert "○" in rendered  # idle icon
 
     @pytest.mark.asyncio
+    async def test_input_has_focus_on_startup(self, app):
+        """Input box should have focus immediately on startup so user can type."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            inp = app.query_one("#user-input", Input)
+            assert inp.has_focus, "Input should have focus on startup"
+            assert app.focused is inp, f"Focused widget should be Input, got {app.focused}"
+
+    @pytest.mark.asyncio
+    async def test_typing_goes_to_input(self, app):
+        """Keystrokes should appear in the input box."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            inp = app.query_one("#user-input", Input)
+            await pilot.press("h", "e", "l", "l", "o")
+            assert inp.value == "hello", f"Expected 'hello', got '{inp.value}'"
+
+    @pytest.mark.asyncio
+    async def test_input_visible_with_nonzero_size(self, app):
+        """Input box should be visible and have non-zero dimensions."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            inp = app.query_one("#user-input", Input)
+            assert inp.visible is True
+            assert inp.size.width > 0
+            assert inp.size.height > 0
+            assert inp.region.height > 0
+
+    @pytest.mark.asyncio
     async def test_initial_context_panel_renders(self, app):
         """Context usage panel should render with CONTEXT WINDOW header."""
         async with app.run_test(size=(120, 40)) as pilot:
