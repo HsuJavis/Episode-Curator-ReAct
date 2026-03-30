@@ -647,6 +647,7 @@ class EpisodeCuratorApp(App):
             text = data.get("text", "")
             if len(text) > 200:
                 text = text[:197] + "..."
+            self._plain_log.append(f"  [thought] {text}")
             log.write(f"[dim italic #6c7a89]  💭 {text}[/]")
 
         elif kind == "action":
@@ -655,12 +656,14 @@ class EpisodeCuratorApp(App):
             inp_str = json.dumps(inp, ensure_ascii=False)
             if len(inp_str) > 80:
                 inp_str = inp_str[:77] + "..."
+            self._plain_log.append(f"  [tool] {tool}({inp_str})")
             log.write(f"[bold #f0a500]  🔧 {tool}[/][#d4a017]({inp_str})[/]")
 
         elif kind == "observation":
             result = data.get("result", "")
             if len(result) > 150:
                 result = result[:147] + "..."
+            self._plain_log.append(f"  [result] {result}")
             log.write(f"[#4ecca3]  📋 {result}[/]")
 
         elif kind == "answer":
@@ -679,6 +682,7 @@ class EpisodeCuratorApp(App):
 
         elif kind == "error":
             msg = data.get("message", "Unknown error")
+            self._plain_log.append(f"  [error] {msg}")
             log.write(f"\n[bold red]  ✗ Error: {msg}[/]\n")
             status = self.query_one("#status-bar", StatusBar)
             status.busy = False
@@ -886,7 +890,14 @@ def _relative_time(iso_str: str) -> str:
 # ============================================================
 
 def main():
-    app = EpisodeCuratorApp()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Episode Curator ReAct Agent TUI")
+    parser.add_argument("--threshold-pct", type=int, default=50,
+                        help="Compression threshold as %% of model context window (default: 50)")
+    args = parser.parse_args()
+
+    app = EpisodeCuratorApp(threshold_pct=args.threshold_pct)
     app.run()
 
 

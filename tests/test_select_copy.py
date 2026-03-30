@@ -113,6 +113,43 @@ class TestPlainLog:
 
             assert any("my answer here" in line for line in app._plain_log)
 
+    @pytest.mark.asyncio
+    async def test_thought_in_plain_log(self, app):
+        """Thought events should be in plain log."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            app._handle_event(TUIEvent("thought", {"text": "thinking about it"}))
+            await pilot.pause()
+            assert any("thinking about it" in line for line in app._plain_log)
+
+    @pytest.mark.asyncio
+    async def test_action_in_plain_log(self, app):
+        """Action events should be in plain log."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            app._handle_event(TUIEvent("action", {"tool": "read", "input": {"file_path": "/tmp/x"}}))
+            await pilot.pause()
+            assert any("read" in line for line in app._plain_log)
+
+    @pytest.mark.asyncio
+    async def test_observation_in_plain_log(self, app):
+        """Observation events should be in plain log."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            app._handle_event(TUIEvent("observation", {"result": "file content here"}))
+            await pilot.pause()
+            assert any("file content" in line for line in app._plain_log)
+
+
+class TestThresholdPctArg:
+    """--threshold-pct CLI arg should be passed to App."""
+
+    def test_app_accepts_threshold_pct(self):
+        app = EpisodeCuratorApp(threshold_pct=10)
+        assert app._threshold_pct == 10
+        assert app._threshold == app._context_window * 10 // 100
+
+    def test_default_threshold_pct_is_50(self):
+        app = EpisodeCuratorApp()
+        assert app._threshold_pct == 50
+
 
 class TestQuitBinding:
     """Ctrl+Q should quit, Ctrl+C should not quit."""
