@@ -68,6 +68,10 @@ class SkillPlugin(ABC):
     def on_token_usage(self, ctx: AgentContext, input_tokens: int, output_tokens: int) -> None:
         pass
 
+    def on_stream_delta(self, ctx: AgentContext, delta: str) -> None:
+        """Called for each text chunk during streaming API responses."""
+        pass
+
 
 class SkillPluginManager:
     """Manages plugin registration, tool routing, and hook dispatch."""
@@ -207,6 +211,10 @@ class SkillPluginManager:
         for plugin in self._plugins:
             plugin.on_token_usage(ctx, input_tokens, output_tokens)
 
+    def dispatch_on_stream_delta(self, ctx: AgentContext, delta: str) -> None:
+        for plugin in self._plugins:
+            plugin.on_stream_delta(ctx, delta)
+
 
 def _resolve_auth(api_key: str | None = None) -> dict:
     """Resolve Anthropic client auth: api_key param → env var → OAuth credentials."""
@@ -312,7 +320,11 @@ class ReActAgent:
             if tools:
                 api_params["tools"] = tools
 
-            response = self._client.messages.create(**api_params)
+            # Use streaming to emit text deltas in real time
+            with self._client.messages.stream(**api_params) as stream:
+                for delta in stream.text_stream:
+                    self._manager.dispatch_on_stream_delta(ctx, delta)
+                response = stream.get_final_message()
 
             # Track token usage
             input_tokens = response.usage.input_tokens
