@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from abc import ABC, abstractmethod
@@ -11,6 +12,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 import anthropic
+
+logger = logging.getLogger("react_agent")
 
 
 @dataclass
@@ -291,13 +294,20 @@ class ReActAgent:
         )
         ctx.metadata["_base_system_prompt"] = self.system_prompt
         ctx.messages.append({"role": "user", "content": user_query})
+        logger.info("agent.run | model=%s query=%s history_len=%d",
+                     self.model, user_query[:80], len(ctx.messages) - 1)
         self._manager.dispatch_on_agent_start(ctx)
         final_answer = self._react_loop(ctx)
+        logger.info("agent.run.done | iterations=%d in=%d out=%d elapsed=%.1fs",
+                     ctx.iteration, ctx.total_input_tokens, ctx.total_output_tokens,
+                     time.time() - ctx.start_time)
         return final_answer
 
     def _react_loop(self, ctx: AgentContext) -> str:
         while ctx.iteration < self.max_iterations:
             ctx.iteration += 1
+            logger.debug("loop.iter | iter=%d/%d msgs=%d",
+                         ctx.iteration, self.max_iterations, len(ctx.messages))
 
             # Refresh active tool definitions each iteration (dynamic loading)
             tools = self._manager.get_active_tool_definitions()
@@ -332,14 +342,16 @@ class ReActAgent:
                         response = stream.get_final_message()
                     break  # success
                 except anthropic.AuthenticationError:
+                    logger.warning("api.auth_error | attempt=%d/%d", _attempt + 1, 3)
                     if _attempt < 2:
-                        # Wait for Claude Code to refresh the OAuth token on disk
                         time.sleep(2)
                         token = _read_oauth_token()
                         if token:
+                            logger.info("api.token_refreshed")
                             self._client = anthropic.Anthropic(api_key=token)
                             self._uses_oauth = True
                     else:
+                        logger.error("api.auth_failed | all 3 attempts exhausted")
                         raise ValueError(
                             "Authentication failed after 3 attempts. "
                             "Ensure Claude Code is running (for OAuth) or check ANTHROPIC_API_KEY."
@@ -350,6 +362,9 @@ class ReActAgent:
             output_tokens = response.usage.output_tokens
             ctx.total_input_tokens += input_tokens
             ctx.total_output_tokens += output_tokens
+            logger.info("api.tokens | iter=%d in=%d out=%d cumul_in=%d cumul_out=%d stop=%s",
+                        ctx.iteration, input_tokens, output_tokens,
+                        ctx.total_input_tokens, ctx.total_output_tokens, response.stop_reason)
             self._manager.dispatch_on_token_usage(ctx, input_tokens, output_tokens)
 
             # Append assistant response
@@ -384,12 +399,19 @@ class ReActAgent:
                     tc = self._manager.dispatch_before_action(ctx, tc)
 
                     if tc.get("_blocked"):
+                        logger.info("tool.blocked | name=%s", tc["name"])
                         result = tc["_blocked"]
                     else:
                         try:
+                            logger.info("tool.call | name=%s input=%s",
+                                        tc["name"], json.dumps(tc["input"], ensure_ascii=False)[:200])
                             result = self._manager.route_tool_call(tc["name"], tc["input"])
+                            result_preview = str(result)[:200] if result else ""
+                            logger.debug("tool.result | name=%s len=%d preview=%s",
+                                         tc["name"], len(str(result)), result_preview)
                             result = self._manager.dispatch_after_action(ctx, tc, result)
                         except Exception as e:
+                            logger.error("tool.error | name=%s error=%s", tc["name"], e)
                             error_msg = self._manager.dispatch_on_error(ctx, e)
                             result = error_msg or f"Error: {e}"
 

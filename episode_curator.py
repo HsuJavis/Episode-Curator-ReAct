@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -12,6 +13,8 @@ from typing import Any, Optional
 
 import anthropic
 from react_agent import AgentContext, ReActAgent, SkillPlugin, _resolve_auth
+
+logger = logging.getLogger("episode_curator")
 
 
 # ============================================================
@@ -727,15 +730,22 @@ class EpisodeCuratorPlugin(SkillPlugin):
 
         if parts:
             ctx.metadata["system_prompt_extra"] = "\n\n".join(parts)
+        logger.info("curator.start | facts=%d episodes=%d",
+                     len(facts), len(self._store._index))
 
     def on_token_usage(self, ctx: AgentContext, input_tokens: int, output_tokens: int) -> None:
         """Core compression logic — triggered when input_tokens exceed threshold."""
         if input_tokens < self._threshold:
+            logger.debug("curator.token_check | in=%d threshold=%d — below, skip",
+                         input_tokens, self._threshold)
             return
 
         messages = ctx.messages
         if len(messages) <= self._preserve_recent + 1:
+            logger.debug("curator.compress_skip | msgs=%d too_few", len(messages))
             return  # Not enough messages to compress
+        logger.warning("curator.compress_triggered | in=%d threshold=%d msgs=%d",
+                       input_tokens, self._threshold, len(messages))
 
         # Keep first message (original question) and last N messages
         first_msg = messages[0]
@@ -759,16 +769,21 @@ class EpisodeCuratorPlugin(SkillPlugin):
                 continue
 
             ep_id = self._store._next_episode_id()
+            title = segment.get("title", "Untitled")
+            tags = segment.get("tags", ["misc"])
+            sal = segment.get("salience", 0.5)
             self._store.save_episode(
                 episode_id=ep_id,
                 messages=ep_messages,
-                title=segment.get("title", "Untitled"),
+                title=title,
                 summary=segment.get("summary", ""),
-                tags=segment.get("tags", ["misc"]),
+                tags=tags,
                 continues_episode=segment.get("continues_episode"),
-                salience=segment.get("salience", 0.5),
+                salience=sal,
                 dimensions=segment.get("dimensions"),
             )
+            logger.info("curator.episode_saved | id=%s title=%s tags=%s salience=%.1f msgs=%d",
+                        ep_id, title, tags, sal, len(ep_messages))
 
         # Save facts
         if result.get("facts"):

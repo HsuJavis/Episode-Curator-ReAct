@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -18,6 +19,8 @@ from textual.widget import Widget
 from textual.widgets import Footer, Input, RichLog, Static, TextArea
 
 from react_agent import AgentContext, SkillPlugin
+
+logger = logging.getLogger("cli_app")
 
 
 # ============================================================
@@ -160,14 +163,21 @@ class TUIPlugin(SkillPlugin):
         self._cumulative_input_tokens += input_tokens
         self._cumulative_output_tokens += output_tokens
 
-        # Estimate context breakdown — tool tokens reflect current active set
+        # Context breakdown: total = input_tokens (from API, accurate)
+        # System and tools are estimated; messages = total - system - tools
         extra = ctx.metadata.get("system_prompt_extra", "")
         system_est = _estimate_tokens(extra) + self._system_base_tokens
         tool_est = self._get_active_tool_tokens() if self._get_active_tool_tokens else self._tool_tokens
+        # Clamp estimates so they don't exceed actual input_tokens
+        if system_est + tool_est > input_tokens:
+            ratio = input_tokens / max(system_est + tool_est, 1)
+            system_est = int(system_est * ratio)
+            tool_est = int(tool_est * ratio)
+        msg_est = max(0, input_tokens - system_est - tool_est)
         context = {
             "system": system_est,
             "tools": tool_est,
-            "messages": max(0, input_tokens - system_est - tool_est),
+            "messages": msg_est,
         }
 
         cur_count = self._count_episodes()
@@ -487,8 +497,8 @@ class EpisodeCuratorApp(App):
         Binding("ctrl+b", "toggle_detail_msgs", "Msgs", show=True),
         Binding("ctrl+s", "toggle_select_mode", "Select", show=True),
         Binding("escape", "exit_select_mode", "", show=False),
-        Binding("up", "history_up", "", show=False, priority=True),
-        Binding("down", "history_down", "", show=False, priority=True),
+        Binding("up", "history_up", "", show=False),
+        Binding("down", "history_down", "", show=False),
     ]
 
     def __init__(self, agent=None, store=None, threshold_pct: int = 50, **kwargs):
@@ -790,10 +800,10 @@ class EpisodeCuratorApp(App):
         log.clear()
 
     def action_history_up(self):
-        """Navigate to previous command in history."""
-        if not self._input_history:
-            return
+        """Navigate to previous command in history (only when input is focused)."""
         inp = self.query_one("#user-input", Input)
+        if not inp.has_focus or not self._input_history:
+            return
         if self._history_index == -1:
             self._history_index = len(self._input_history) - 1
         elif self._history_index > 0:
@@ -802,8 +812,10 @@ class EpisodeCuratorApp(App):
         inp.cursor_position = len(inp.value)
 
     def action_history_down(self):
-        """Navigate to next command in history."""
+        """Navigate to next command in history (only when input is focused)."""
         inp = self.query_one("#user-input", Input)
+        if not inp.has_focus:
+            return
         if self._history_index == -1:
             return
         if self._history_index < len(self._input_history) - 1:
@@ -889,13 +901,32 @@ def _relative_time(iso_str: str) -> str:
 # Entry point
 # ============================================================
 
+def _setup_logging(log_file: str = "agent.log", level: str = "DEBUG") -> None:
+    """Configure structured logging to file for all agent modules."""
+    fmt = "%(asctime)s %(levelname)-5s %(name)s | %(message)s"
+    handler = logging.FileHandler(log_file, encoding="utf-8")
+    handler.setFormatter(logging.Formatter(fmt, datefmt="%H:%M:%S"))
+    for name in ("react_agent", "episode_curator", "system_tools", "cli_app",
+                 "tool_registry", "skill_loader", "hook_manager", "mcp_client"):
+        mod_logger = logging.getLogger(name)
+        mod_logger.setLevel(getattr(logging, level.upper(), logging.DEBUG))
+        mod_logger.addHandler(handler)
+    logging.getLogger("react_agent").info("logging.init | file=%s level=%s", log_file, level)
+
+
 def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Episode Curator ReAct Agent TUI")
     parser.add_argument("--threshold-pct", type=int, default=50,
                         help="Compression threshold as %% of model context window (default: 50)")
+    parser.add_argument("--log-file", default="agent.log",
+                        help="Log file path (default: agent.log)")
+    parser.add_argument("--log-level", default="DEBUG", choices=["DEBUG", "INFO", "WARNING"],
+                        help="Log level (default: DEBUG)")
     args = parser.parse_args()
+
+    _setup_logging(args.log_file, args.log_level)
 
     app = EpisodeCuratorApp(threshold_pct=args.threshold_pct)
     app.run()

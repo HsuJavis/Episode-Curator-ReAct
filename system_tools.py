@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import platform
 import re
@@ -18,6 +19,8 @@ from pathlib import Path
 from typing import Any
 
 from react_agent import SkillPlugin
+
+logger = logging.getLogger("system_tools")
 
 MAX_OUTPUT = 100_000  # 100KB cap for bash output
 MAX_FETCH = 50_000    # 50KB cap for web_fetch (fits in LLM context)
