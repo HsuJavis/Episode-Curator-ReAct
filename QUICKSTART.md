@@ -92,10 +92,10 @@ while True:
 
 ```bash
 # 直接啟動
-python cli_app.py
+uv run python cli_app.py
 
 # 自訂 episode 存放位置
-EPISODE_STORE_DIR=./my_episodes python cli_app.py
+EPISODE_STORE_DIR=./my_episodes uv run python cli_app.py
 ```
 
 ### 5. 跑測試
