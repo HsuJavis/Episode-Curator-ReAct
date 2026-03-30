@@ -594,8 +594,13 @@ class EpisodeCuratorApp(App):
 
         try:
             answer = self._agent.run(message, list(self._history))
-            self._history.append({"role": "user", "content": message})
-            self._history.append({"role": "assistant", "content": answer})
+            # Preserve full ctx.messages (including tool_use/tool_result and
+            # any compression done by Curator) for next run()
+            if hasattr(self._agent, '_last_ctx'):
+                self._history = list(self._agent._last_ctx.messages)
+            else:
+                self._history.append({"role": "user", "content": message})
+                self._history.append({"role": "assistant", "content": answer})
         except Exception as e:
             logger.error("run_agent.failed | error=%s", e, exc_info=True)
             self.call_from_thread(self._on_error, str(e))

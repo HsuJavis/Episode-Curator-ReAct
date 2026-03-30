@@ -294,8 +294,8 @@ class ReActAgent:
         )
         ctx.metadata["_base_system_prompt"] = self.system_prompt
         ctx.messages.append({"role": "user", "content": user_query})
-        logger.info("agent.run | model=%s query=%s history_len=%d",
-                     self.model, user_query[:80], len(ctx.messages) - 1)
+        logger.info("agent.run | model=%s query=%s history_msgs=%d",
+                     self.model, user_query[:80], len(ctx.messages))
         try:
             self._manager.dispatch_on_agent_start(ctx)
         except Exception as e:
@@ -303,9 +303,10 @@ class ReActAgent:
             raise
         logger.debug("agent.start_done | extra_len=%d", len(ctx.metadata.get("system_prompt_extra", "")))
         final_answer = self._react_loop(ctx)
-        logger.info("agent.run.done | iterations=%d in=%d out=%d elapsed=%.1fs",
+        self._last_ctx = ctx  # preserve for TUI history
+        logger.info("agent.run.done | iterations=%d in=%d out=%d msgs=%d elapsed=%.1fs",
                      ctx.iteration, ctx.total_input_tokens, ctx.total_output_tokens,
-                     time.time() - ctx.start_time)
+                     len(ctx.messages), time.time() - ctx.start_time)
         return final_answer
 
     def _react_loop(self, ctx: AgentContext) -> str:
