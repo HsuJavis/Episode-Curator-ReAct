@@ -4,7 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 py-modules = ["react_agent", "episode_curator", "web_app", "cli_app",
-              "system_tools", "hook_manager", "mcp_client", "skill_loader"]
+              "system_tools", "hook_manager", "mcp_client", "skill_loader",
+              "tool_registry"]
 
 [project]
 name = "episode-curator-react"
