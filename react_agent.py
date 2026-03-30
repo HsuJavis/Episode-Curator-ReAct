@@ -244,6 +244,16 @@ def _read_oauth_token() -> str | None:
     return None
 
 
+def _try_cli_token_refresh() -> None:
+    """Try to trigger OAuth token refresh via claude CLI."""
+    import subprocess as _sp
+    try:
+        _sp.run(["claude", "auth", "status"], capture_output=True, timeout=10)
+        logger.info("api.cli_refresh_triggered")
+    except Exception:
+        pass  # CLI not available, no-op
+
+
 def _is_oauth_auth(api_key: str | None) -> bool:
     """Check if we're using OAuth (no explicit api_key or env var)."""
     return api_key is None and not os.environ.get("ANTHROPIC_API_KEY")
@@ -342,7 +352,8 @@ class ReActAgent:
             response = None
             logger.debug("api.call | iter=%d model=%s tools=%d msgs=%d",
                          ctx.iteration, self.model, len(tools), len(ctx.messages))
-            for _attempt in range(3):
+            max_retries = 5
+            for _attempt in range(max_retries):
                 try:
                     with self._client.messages.stream(**api_params) as stream:
                         for delta in stream.text_stream:
@@ -350,22 +361,27 @@ class ReActAgent:
                         response = stream.get_final_message()
                     break  # success
                 except anthropic.AuthenticationError:
-                    logger.warning("api.auth_error | attempt=%d/%d", _attempt + 1, 3)
-                    if _attempt < 2:
-                        time.sleep(2)
+                    delay = min(2 ** (_attempt + 1), 16)  # 2, 4, 8, 16, 16
+                    logger.warning("api.auth_error | attempt=%d/%d retry_in=%ds",
+                                   _attempt + 1, max_retries, delay)
+                    if _attempt < max_retries - 1:
+                        # Try to trigger token refresh via claude CLI
+                        if _attempt >= 1:
+                            _try_cli_token_refresh()
+                        time.sleep(delay)
                         token = _read_oauth_token()
                         if token:
-                            logger.info("api.token_refreshed | token_prefix=%s", token[:15])
+                            logger.info("api.token_reloaded | token_prefix=%s", token[:15])
                             self._client = anthropic.Anthropic(api_key=token)
                             self._uses_oauth = True
                         else:
-                            logger.error("api.no_token | OAuth credentials file missing or empty")
+                            logger.error("api.no_token | credentials file missing")
                     else:
-                        logger.error("api.auth_failed | all 3 attempts exhausted")
+                        logger.error("api.auth_failed | all %d attempts exhausted", max_retries)
                         raise
                 except Exception as e:
                     logger.error("api.error | attempt=%d/%d type=%s error=%s",
-                                 _attempt + 1, 3, type(e).__name__, e)
+                                 _attempt + 1, max_retries, type(e).__name__, e)
                     raise
 
             # Track token usage
