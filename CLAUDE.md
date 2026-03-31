@@ -780,12 +780,66 @@ uv run python cli_app.py
 # 自訂壓縮門檻（context window 的 30%）
 uv run python cli_app.py --threshold-pct 30
 
+# 自訂 log 輸出
+uv run python cli_app.py --log-file debug.log --log-level INFO
+
 # 自訂 episode 儲存目錄
 EPISODE_STORE_DIR=./my_episodes uv run python cli_app.py
 
 # 指定模型
 WORKER_MODEL=claude-sonnet-4-20250514 uv run python cli_app.py
 ```
+
+### CLI 參數
+
+| 參數 | 預設值 | 說明 |
+|------|--------|------|
+| `--threshold-pct` | `50` | 壓縮門檻 = model context window × 此百分比 |
+| `--log-file` | `agent.log` | 結構化 log 輸出路徑 |
+| `--log-level` | `DEBUG` | Log 等級（DEBUG / INFO / WARNING） |
+
+### 環境變數
+
+| 變數 | 預設值 | 說明 |
+|------|--------|------|
+| `WORKER_MODEL` | `claude-haiku-4-5-20251001` | Worker LLM 模型名稱 |
+| `CURATOR_MODEL` | `claude-haiku-4-5-20251001` | Curator LLM 模型名稱 |
+| `EPISODE_STORE_DIR` | `~/.episode_store` | Episode 儲存目錄 |
+| `ANTHROPIC_API_KEY` | （空） | Anthropic API key（未設定則 fallback 到 OAuth） |
+
+### 認證方式
+
+優先順序：`ANTHROPIC_API_KEY` 環境變數 → `~/.claude/.credentials.json` OAuth token
+
+OAuth token 來自 Claude Code CLI 登入。若遇到 401，agent 會自動 retry（5 次指數退避 + 觸發 CLI refresh）。
+
+### 可觀測性（Logging）
+
+啟動後所有事件寫入 `agent.log`（或 `--log-file` 指定的路徑），可用 `tail -f agent.log` 即時監看。
+
+所有模組（react_agent, episode_curator, system_tools, cli_app, tool_registry, skill_loader）都有獨立 logger。Log 使用 line buffering，crash 也不會丟失。
+
+關鍵 log 事件：
+
+| 事件 | 等級 | 說明 |
+|------|------|------|
+| `agent.run` | INFO | 每次 run 的 model、query、history 條數 |
+| `agent.run.done` | INFO | iterations、累計 tokens、msgs 數、耗時 |
+| `api.call` | DEBUG | 每次 API call 的 model、tools 數、msgs 數 |
+| `api.tokens` | INFO | 每次 API 回傳的 input/output tokens、stop_reason |
+| `api.auth_error` | WARNING | 401 認證失敗，顯示 retry 次數和延遲 |
+| `api.token_reloaded` | INFO | 重新載入 OAuth token |
+| `api.cli_refresh_ok` | INFO | 透過 claude CLI 觸發 token refresh |
+| `tool.call` | INFO | 工具呼叫名稱和 input |
+| `tool.result` | DEBUG | 工具回傳長度和 preview |
+| `tool.error` | ERROR | 工具執行錯誤 |
+| `curator.start` | INFO | Agent 啟動時的 facts 和 episodes 數量 |
+| `curator.token_check` | DEBUG | 每次 token 用量檢查（是否觸發壓縮） |
+| `curator.compress_triggered` | WARNING | 壓縮觸發：input tokens、threshold、msgs 數 |
+| `curator.episode_saved` | INFO | Episode 存檔：id、title、tags、salience、msgs 數 |
+| `curator.compressed` | INFO | 壓縮完成：before/after msgs、archived/kept、episodes total |
+| `init_agent.failed` | ERROR | Agent 初始化失敗（含完整 traceback） |
+| `run_agent.failed` | ERROR | Agent 執行失敗（含完整 traceback） |
 
 ### Python API
 
@@ -795,12 +849,11 @@ from episode_curator import create_agent
 agent = create_agent()
 answer = agent.run("你的問題")
 
-# 多輪對話
+# 多輪對話（full history 自動累積 + Curator 自動壓縮）
 history = []
 for query in queries:
     answer = agent.run(query, history)
-    history.append({"role": "user", "content": query})
-    history.append({"role": "assistant", "content": answer})
+    history = list(agent._last_ctx.messages)  # 保留完整 ctx（含 tool_use/tool_result）
 ```
 
 ## 依賴
@@ -808,8 +861,6 @@ for query in queries:
 ```
 pip install anthropic textual
 ```
-
-環境變數：`ANTHROPIC_API_KEY`
 
 ## 測試要點
 
@@ -868,6 +919,7 @@ pip install anthropic textual
 | 17 | TUI E2E — tool/skill loading + memory recall + MCP compat + session restart + full pipeline | DONE | 29 (9 真實 API) | — |
 | 18 | Extended System Tools + Context Panel 重構 + 模型感知配置 | DONE | 83 (2 真實 API) | `9eff343` |
 | 19 | 選取模式 + 輸入歷史 + CLI 參數修復 | DONE | 27 | `a6ddb4c` |
+| 20 | 可觀測性 + OAuth retry + context 修復 | DONE | 8 | `b929856` |
 
 ### Spec 測試覆蓋對照
 
@@ -922,4 +974,9 @@ pip install anthropic textual
 | 47 | Plain log 完整記錄所有事件 | `test_select_copy.py::TestPlainLog` | PASS |
 | 48 | Ctrl+Q 退出 / Ctrl+C 非退出 | `test_select_copy.py::TestQuitBinding` | PASS |
 | 49 | --threshold-pct CLI 參數傳遞 | `test_select_copy.py::TestThresholdPctArg` | PASS |
+| 50 | 結構化 logging 全模組 | `test_observability.py::TestLogging` | PASS |
+| 51 | ↑↓ 只在 input focus 時觸發 | `test_observability.py::TestArrowKeyScope` | PASS |
+| 52 | Detail panels 顯示當次 API context | `test_load_unload_visibility.py` (updated) | PASS |
+| 53 | 跨 run 保留完整 ctx.messages | — (integration) | PASS |
+| 54 | OAuth retry 5 次指數退避 + CLI refresh | — (integration) | PASS |
 
