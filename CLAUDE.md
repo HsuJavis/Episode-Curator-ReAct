@@ -579,11 +579,14 @@ When creating a commit:
 ```
 ┌───────────────────────────────────┬────────────────────────────┐
 │  ◈ Conversation                   │  ◈ Context                 │
-│  [user] question                  │  █▒▒▒░░░░░▏░░ 56k/200k 28%│
-│  💭 thinking...                   │  █ system  8.0k  4.0%      │
-│  🔧 recall_episode({query:db})    │  ▓ tools   3.0k  1.5%      │
-│  📋 Found 3 episodes...           │  ▒ msgs   45.0k 22.5%      │
-│  [assistant] answer               │  ▏ compress 100.0k         │
+│  [user] question                  │  █▓▒░░░····▏·· 68k/200k 34%│
+│  💭 thinking...                   │  claude-sonnet-4            │
+│  🔧 recall_episode({query:db})    │  █ System prompt: 8.0k 4.0%│
+│  📋 Found 3 episodes...           │  ▓ Tools:  3.0k  1.5%      │
+│  [assistant] answer               │  ▒ Memory: 12.0k 6.0%      │
+│                                   │  ░ Messages:45.0k 22.5%    │
+│                                   │  · Free:  132.0k 66.0%     │
+│                                   │  ▏ Compress: 100.0k        │
 │  ▌streaming text appears here...  ├────────────────────────────┤
 │                                   │  ◈ Context Detail (Ctrl+D) │
 │                                   │  system_prompt_extra: ...  │
@@ -596,7 +599,7 @@ When creating a commit:
 ├───────────────────────────────────┴────────────────────────────┤
 │  > Type your message...  (↑↓ 歷史命令)                         │
 ├────────────────────────────────────────────────────────────────┤
-│  ○ │ turn 3 │ iter 2/30 │ in: 15.8k │ out: 2.1k │ 3 eps     │
+│  ○ │ turn 3 │ iter 2/30 │ 3 eps │ 1 compress │ 4.7s        │
 └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -615,14 +618,22 @@ When creating a commit:
 
 ### Context Panel
 
-單一堆疊進度條，百分比相對模型 context window（非壓縮門檻）：
-- `█` system（base prompt + system_prompt_extra）
-- `▓` tools（active tool schemas）
-- `▒` msgs（messages）
-- `▏` compress threshold 標記（壓縮觸發位置）
-- `░` 空閒
+單一堆疊進度條 + 分類 breakdown，百分比相對模型 context window：
+- `█` System prompt（base prompt + skill catalog + deferred tool catalog）
+- `▓` Tools（active tool schemas）
+- `▒` Memory（facts + 全局 episode 索引，由 EpisodeCuratorPlugin 注入）
+- `░` Messages（ctx.messages 對話歷史）
+- `·` Free space（剩餘可用）
+- `▏` Compress threshold 標記（壓縮觸發位置）
 
-tool tokens 動態更新：load/unload 後立即反映 active set 的變化。
+顯示模型名稱和 total/cap 用量。tool tokens 動態更新：load/unload 後立即反映。
+
+各插件透過 `ctx.metadata["_system_extra_parts"]` 存放各自對 `system_prompt_extra` 的貢獻：
+- `memory`: EpisodeCuratorPlugin（facts + global index）
+- `skills`: SkillLoaderPlugin（skill catalog）
+- `tool_catalog`: ToolRegistryPlugin（deferred tool listing）
+
+TUIPlugin 讀取這些分類來估算 per-category token breakdown。
 
 ### 選取模式
 
@@ -659,16 +670,18 @@ MODEL_CONTEXT_WINDOWS = {
 ### Status Line
 
 ```
- ◉ │ turn 3 │ iter 2/30 │ in: 15.8k │ out: 2.1k │ 3 eps │ 4.7s
- ↑     ↑         ↑            ↑           ↑         ↑       ↑
- │     │         │            │           │         │       └─ 經過時間
- │     │         │            │           │         └─ episode 數量
- │     │         │            │           └─ 累計輸出 tokens
- │     │         │            └─ 累計輸入 tokens
+ ◉ │ turn 3 │ iter 2/30 │ 3 eps │ 1 compress │ 4.7s
+ ↑     ↑         ↑         ↑         ↑           ↑
+ │     │         │         │         │           └─ 經過時間
+ │     │         │         │         └─ 壓縮觸發次數（0 = 從未壓縮）
+ │     │         │         └─ episode 數量
  │     │         └─ 當前 run 的 ReAct loop 輪次 / 最大輪數
  │     └─ 累計對話 turn 數（跨多次 agent.run()）
  └─ ◉ busy / ○ idle
 ```
+
+in/out tokens 已移至 Context Panel（避免與 context window 用量混淆）。
+compress count 讓使用者直觀判斷壓縮是否發生。
 
 ### 工廠函式
 
@@ -920,6 +933,7 @@ pip install anthropic textual
 | 18 | Extended System Tools + Context Panel 重構 + 模型感知配置 | DONE | 83 (2 真實 API) | `9eff343` |
 | 19 | 選取模式 + 輸入歷史 + CLI 參數修復 | DONE | 27 | `a6ddb4c` |
 | 20 | 可觀測性 + OAuth retry + context 修復 | DONE | 8 | `b929856` |
+| 21 | Context Panel 分類重構 + Curator prompt 優化 + SDK 序列化修復 | DONE | 370 | — |
 
 ### Spec 測試覆蓋對照
 
@@ -979,4 +993,8 @@ pip install anthropic textual
 | 52 | Detail panels 顯示當次 API context | `test_load_unload_visibility.py` (updated) | PASS |
 | 53 | 跨 run 保留完整 ctx.messages | — (integration) | PASS |
 | 54 | OAuth retry 5 次指數退避 + CLI refresh | — (integration) | PASS |
+| 55 | Context panel 分類 breakdown (system/tools/memory/msgs/free) | `test_context_fixes.py` + `test_cli_tui.py` | PASS |
+| 56 | Status bar compress count + 移除 in/out | `test_cli_tui.py::TestStatusBar` | PASS |
+| 57 | SDK ParsedTextBlock → dict 序列化 | — (integration, 真實 API) | PASS |
+| 58 | Curator meta-message 過濾 + prompt 優化 | — (integration, 真實 API) | PASS |
 

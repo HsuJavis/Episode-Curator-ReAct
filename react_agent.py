@@ -411,8 +411,20 @@ class ReActAgent:
                         ctx.total_input_tokens, ctx.total_output_tokens, response.stop_reason)
             self._manager.dispatch_on_token_usage(ctx, input_tokens, output_tokens)
 
-            # Append assistant response
-            ctx.messages.append({"role": "assistant", "content": response.content})
+            # Append assistant response — convert SDK objects to plain dicts
+            # so episodes can be saved with json.dumps later
+            content_dicts = []
+            for block in response.content:
+                if block.type == "text":
+                    content_dicts.append({"type": "text", "text": block.text})
+                elif block.type == "tool_use":
+                    content_dicts.append({
+                        "type": "tool_use", "id": block.id,
+                        "name": block.name, "input": block.input,
+                    })
+                else:
+                    content_dicts.append({"type": block.type})
+            ctx.messages.append({"role": "assistant", "content": content_dicts})
 
             # Process response blocks
             tool_uses = []

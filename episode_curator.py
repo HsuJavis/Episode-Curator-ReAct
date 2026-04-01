@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import re
-import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
@@ -356,10 +355,12 @@ class EpisodeStore:
 
         return generated
 
-    def add_facts(self, facts: list[str]) -> None:
+    def add_facts(self, facts: list) -> None:
         """Add permanent facts (deduplicated, max 50)."""
         existing = set(self._facts)
         for fact in facts:
+            if not isinstance(fact, str):
+                fact = str(fact)
             fact = fact.strip()
             if fact and fact not in existing:
                 self._facts.append(fact)
@@ -401,50 +402,58 @@ class EpisodeStore:
 class Curator:
     """Second LLM that segments messages by topic."""
 
-    SYSTEM_PROMPT = """你是一個對話整理助手。你的工作是將一段對話訊息按主題分段，並評估每段的認知權重。
+    SYSTEM_PROMPT = """你是對話整理助手。將對話訊息按主題分段並評估認知權重。
 
-規則：
-1. 按主題分段，同一主題的訊息即使不相鄰也歸為一段
-2. 參考已有的主題索引，盡量複用已有的 tag
-3. 如果新訊息是已有主題的延續，summary 開頭標註「接續 #xxx：」
-4. continues_episode 是可選欄位，填入被延續的 episode ID
-5. 如果是全新主題，不填 continues_episode
-6. 提取重要的永久事實（使用者偏好、技術棧等）
-7. 為每個 segment 評估 salience 分數（0.0~1.0），代表認知權重：
-   - 0.0-0.3: 普通資訊交換、確認型回覆
-   - 0.4-0.6: 一般決策或中等複雜度討論
-   - 0.7-0.9: 錯誤修正、重要決策、方向轉變
-   - 1.0: 關鍵突破、重大架構決策、嚴重 bug 修復
-   評分依據：包含錯誤修正 +0.3、重要決策 +0.2、方向轉變 +0.2、正向確認 +0.1、基線 0.3
-8. 填寫 dimensions 物件，捕捉多維度認知摘要：
-   - decisions: 做了什麼決定+為什麼（列表，可為空）
-   - corrections: 錯誤修正過程（列表，可為空）
-   - insights: 洞察/發現（列表，可為空）
-   - pending: 還剩什麼沒做（列表，可為空）
-   - user_intent: 使用者到底想要什麼（字串，必填）
-   - outcome: "positive" / "negative" / "neutral"（必填）
+核心原則：
+- 只關注使用者的實際問題和助手的實質回答
+- 忽略系統生成的上下文管理訊息（如摘要索引、脈絡確認）
+- 寧可少分段也不要創建低價值的 episode
 
-你必須回傳 JSON（不要包含 markdown code fence）：
+分段規則：
+1. 按主題分段，同一主題即使不相鄰也歸為一段
+2. 複用已有的 tag，不自創已有 tag 的同義詞
+3. 延續已有主題 → summary 開頭加「接續 #xxx：」，填 continues_episode
+4. 全新主題 → 不填 continues_episode
+5. 如果一組訊息只有簡單問答（< 3 條且無工具呼叫），合併到相近主題，不單獨成段
+
+Facts 提取 — 只提取以下類型，每次最多 5 條：
+- 使用者的身份/角色/偏好
+- 專案使用的技術棧/架構決策
+- 明確的需求或約束
+不要提取：對話流程觀察、助手行為描述、上下文管理相關的 meta 資訊
+
+Salience 評分（0.0~1.0）：
+- 0.1-0.3: 簡單問答、資訊確認
+- 0.4-0.6: 一般討論、中等決策
+- 0.7-0.9: 錯誤修正、重要決策、方向轉變
+- 1.0: 關鍵突破、重大架構決策
+計算：基線 0.3 + 錯誤修正 0.3 + 重要決策 0.2 + 方向轉變 0.2 + 確認 0.1
+
+Dimensions：
+- decisions: 決定+原因（列表）
+- corrections: 錯誤→修正（列表）
+- insights: 洞察/發現（列表）
+- pending: 未完成事項（列表）
+- user_intent: 使用者目的（字串，必填）
+- outcome: "positive"/"negative"/"neutral"（必填）
+
+回傳 JSON（無 code fence）：
 {
   "segments": [
     {
       "title": "主題名",
-      "summary": "一句話摘要（如是延續，開頭加「接續 #xxx：」）",
+      "summary": "一句話摘要",
       "tags": ["tag1"],
       "message_indices": [0, 1, 2],
       "continues_episode": "001",
-      "salience": 0.7,
+      "salience": 0.5,
       "dimensions": {
-        "decisions": ["決定 X 因為 Y"],
-        "corrections": ["原本用 A 失敗，改用 B"],
-        "insights": ["發現 Z 的性價比最高"],
-        "pending": ["尚未處理 error handling"],
-        "user_intent": "使用者想建立高效的 CI pipeline",
-        "outcome": "positive"
+        "decisions": [], "corrections": [], "insights": [],
+        "pending": [], "user_intent": "...", "outcome": "neutral"
       }
     }
   ],
-  "facts": ["事實1", "事實2"]
+  "facts": []
 }"""
 
     def __init__(self, api_key: str | None = None, model: str = "claude-haiku-4-5-20251001"):
@@ -729,7 +738,9 @@ class EpisodeCuratorPlugin(SkillPlugin):
             parts.append("對話歷史索引：\n" + global_index)
 
         if parts:
-            ctx.metadata["system_prompt_extra"] = "\n\n".join(parts)
+            memory_text = "\n\n".join(parts)
+            ctx.metadata["system_prompt_extra"] = memory_text
+            ctx.metadata.setdefault("_system_extra_parts", {})["memory"] = memory_text
         logger.info("curator.start | facts=%d episodes=%d",
                      len(facts), len(self._store._index))
 
@@ -753,6 +764,12 @@ class EpisodeCuratorPlugin(SkillPlugin):
         to_archive = messages[1:cut_point]
         to_keep = messages[cut_point:]
 
+        if not to_archive:
+            return
+
+        # Filter out system-generated meta-messages (context injection from
+        # previous compressions) — these are not real conversation content.
+        to_archive = self._filter_meta_messages(to_archive)
         if not to_archive:
             return
 
@@ -814,7 +831,9 @@ class EpisodeCuratorPlugin(SkillPlugin):
         if global_index:
             parts.append("對話歷史索引：\n" + global_index)
         if parts:
-            ctx.metadata["system_prompt_extra"] = "\n\n".join(parts)
+            memory_text = "\n\n".join(parts)
+            ctx.metadata["system_prompt_extra"] = memory_text
+            ctx.metadata.setdefault("_system_extra_parts", {})["memory"] = memory_text
 
     def on_agent_end(self, ctx: AgentContext, final_answer: str) -> Optional[str]:
         """Rule-based fact extraction (no LLM call)."""
@@ -834,6 +853,35 @@ class EpisodeCuratorPlugin(SkillPlugin):
             if extracted:
                 self._store.add_facts(extracted)
         return None
+
+    # Patterns that identify system-generated context injection messages
+    _META_PATTERNS = (
+        "以下是之前的對話摘要索引",
+        "了解，我已掌握之前的對話脈絡",
+        "好的，讓我來處理你的問題",
+    )
+
+    @staticmethod
+    def _is_meta_message(msg: dict) -> bool:
+        """Check if a message is system-generated (context injection from compression)."""
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            parts = []
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "text":
+                    parts.append(b.get("text", ""))
+                elif hasattr(b, "type") and b.type == "text":
+                    parts.append(getattr(b, "text", ""))
+            text = " ".join(parts)
+        else:
+            return False
+        return any(p in text for p in EpisodeCuratorPlugin._META_PATTERNS)
+
+    def _filter_meta_messages(self, messages: list[dict]) -> list[dict]:
+        """Remove system-generated meta-messages before passing to Curator."""
+        return [m for m in messages if not self._is_meta_message(m)]
 
     @staticmethod
     def _find_safe_cut_point(messages: list, target: int) -> int:

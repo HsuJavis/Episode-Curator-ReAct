@@ -129,9 +129,10 @@ class TestWidgetLayout:
         async with app.run_test(size=(120, 40)) as pilot:
             ctx = app.query_one("#context-usage", ContextUsagePanel)
             rendered = ctx.render()
-            assert "system" in rendered
-            assert "tools" in rendered
-            assert "msgs" in rendered
+            assert "System prompt" in rendered
+            assert "Tools" in rendered
+            assert "Memory" in rendered
+            assert "Messages" in rendered
 
 
 # ============================================================
@@ -222,9 +223,8 @@ class TestEventFlow:
                 TUIEvent("observation", {"result": "Found episode #001"}),
                 TUIEvent("status", {
                     "iteration": 1, "max_iterations": 30,
-                    "input_tokens": 5000, "output_tokens": 800,
                     "elapsed": 2.3, "episode_count": 1,
-                    "context": {"system": 1000, "tools": 500, "messages": 3500},
+                    "context": {"system": 1000, "tools": 500, "memory": 0, "messages": 3500},
                 }),
                 TUIEvent("answer", {"text": "Use B-tree index for equality queries."}),
                 TUIEvent("done", {}),
@@ -236,7 +236,6 @@ class TestEventFlow:
 
             # Status bar should reflect final state
             assert status.iteration == 1
-            assert status.input_tokens == 5000
             assert status.busy is False
 
 
@@ -257,17 +256,14 @@ class TestStatusBar:
         async with app.run_test(size=(120, 40)) as pilot:
             app._handle_event(TUIEvent("status", {
                 "iteration": 3, "max_iterations": 30,
-                "input_tokens": 24500, "output_tokens": 3200,
                 "elapsed": 8.7, "episode_count": 5,
-                "context": {"system": 4000, "tools": 2000, "messages": 18500},
+                "context": {"system": 4000, "tools": 2000, "memory": 0, "messages": 18500},
             }))
             await pilot.pause()
 
             status = app.query_one("#status-bar", StatusBar)
             assert status.iteration == 3
             assert status.max_iterations == 30
-            assert status.input_tokens == 24500
-            assert status.output_tokens == 3200
             assert status.episode_count == 5
             assert abs(status.elapsed - 8.7) < 0.01
 
@@ -278,8 +274,6 @@ class TestStatusBar:
             status = app.query_one("#status-bar", StatusBar)
             status.iteration = 2
             status.max_iterations = 30
-            status.input_tokens = 15800
-            status.output_tokens = 2100
             status.episode_count = 3
             status.elapsed = 5.2
             status.busy = True
@@ -287,8 +281,6 @@ class TestStatusBar:
             rendered = status.render()
             assert "◉" in rendered  # busy icon
             assert "iter 2/30" in rendered
-            assert "15.8k" in rendered
-            assert "2.1k" in rendered
             assert "3 eps" in rendered
             assert "5.2s" in rendered
 
@@ -322,16 +314,16 @@ class TestContextUsagePanel:
         async with app.run_test(size=(120, 40)) as pilot:
             app._handle_event(TUIEvent("status", {
                 "iteration": 1, "max_iterations": 30,
-                "input_tokens": 10000, "output_tokens": 1000,
                 "elapsed": 3.0, "episode_count": 2,
-                "context": {"system": 2500, "tools": 1500, "messages": 6000},
+                "context": {"system": 2500, "tools": 1500, "memory": 500, "messages": 5500},
             }))
             await pilot.pause()
 
             ctx = app.query_one("#context-usage", ContextUsagePanel)
             assert ctx.system_tokens == 2500
             assert ctx.tool_tokens == 1500
-            assert ctx.message_tokens == 6000
+            assert ctx.memory_tokens == 500
+            assert ctx.message_tokens == 5500
 
     @pytest.mark.asyncio
     async def test_context_panel_shows_percentages(self, app):
@@ -340,6 +332,7 @@ class TestContextUsagePanel:
             ctx = app.query_one("#context-usage", ContextUsagePanel)
             ctx.system_tokens = 2000
             ctx.tool_tokens = 1000
+            ctx.memory_tokens = 0
             ctx.message_tokens = 7000
             ctx.threshold = 80000
 
@@ -358,6 +351,7 @@ class TestContextUsagePanel:
             ctx.threshold = 80000
             ctx.system_tokens = 1000
             ctx.tool_tokens = 500
+            ctx.memory_tokens = 0
             ctx.message_tokens = 3500
 
             rendered = ctx.render()
@@ -626,12 +620,12 @@ class TestTUIPlugin:
         assert len(status_events) >= 1
         data = status_events[0].data
         assert data["iteration"] == 1
-        assert data["input_tokens"] >= 2000  # cumulative
         assert "context" in data
         assert "system" in data["context"]
         assert "tools" in data["context"]
+        assert "memory" in data["context"]
         assert "messages" in data["context"]
-        # messages = 2000 - system_est - 300 (tool_tokens)
+        # messages = 2000 - system_est - tool_est - memory_est
         assert data["context"]["messages"] >= 0
 
 
@@ -715,7 +709,7 @@ class TestStatusTurnCounter:
         status_events = [e for e in events if e.kind == "status"]
         assert status_events[0].data["turn"] == 1
 
-    def test_cumulative_tokens_across_runs(self):
+    def test_cumulative_turns_across_runs(self):
         plugin = TUIPlugin()
         events = []
         plugin.set_callback(lambda e: events.append(e))
@@ -738,9 +732,10 @@ class TestStatusTurnCounter:
 
         status_events = [e for e in events if e.kind == "status"]
         last_status = status_events[-1].data
-        assert last_status["input_tokens"] == 1800  # 1000 + 800
-        assert last_status["output_tokens"] == 350   # 200 + 150
         assert last_status["turn"] == 2
+        # Cumulative tokens still tracked internally
+        assert plugin._cumulative_input_tokens == 1800
+        assert plugin._cumulative_output_tokens == 350
 
     def test_status_bar_renders_turn(self):
         """StatusBar should display the turn counter."""

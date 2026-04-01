@@ -817,7 +817,6 @@ class TestTUIFullPipeline:
 
             # Verify status bar updated via app
             assert status.turn >= 1
-            assert status.input_tokens > 0
 
     @pytest.mark.tui
     @pytest.mark.llm

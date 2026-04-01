@@ -110,3 +110,4 @@ class SkillLoaderPlugin(SkillPlugin):
             ctx.metadata["system_prompt_extra"] = f"{existing}\n\n{catalog}"
         else:
             ctx.metadata["system_prompt_extra"] = catalog
+        ctx.metadata.setdefault("_system_extra_parts", {})["skills"] = catalog

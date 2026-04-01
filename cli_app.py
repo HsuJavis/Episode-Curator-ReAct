@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 from textual import work
 from textual.app import App, ComposeResult
@@ -16,7 +15,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.widget import Widget
-from textual.widgets import Footer, Input, RichLog, Static, TextArea
+from textual.widgets import Input, RichLog, Static, TextArea
 
 from react_agent import AgentContext, SkillPlugin
 
@@ -70,6 +69,7 @@ class TUIPlugin(SkillPlugin):
         self._cumulative_input_tokens: int = 0
         self._cumulative_output_tokens: int = 0
         self._total_turns: int = 0
+        self._compress_count: int = 0
         self._get_tools_content: Callable[[], str] | None = None
         self._get_active_tool_tokens: Callable[[], int] | None = None
 
@@ -88,11 +88,10 @@ class TUIPlugin(SkillPlugin):
         self._last_episode_count = self._count_episodes()
         self._total_turns += 1
         self._emit("status", iteration=0, max_iterations=0,
-                   input_tokens=self._cumulative_input_tokens,
-                   output_tokens=self._cumulative_output_tokens,
                    elapsed=0.0, episode_count=self._last_episode_count,
+                   compress_count=self._compress_count,
                    turn=self._total_turns,
-                   context={"system": 0, "tools": 0, "messages": 0})
+                   context={"system": 0, "tools": 0, "memory": 0, "messages": 0})
 
     def on_thought(self, ctx: AgentContext, thought: str) -> Optional[str]:
         self._emit("thought", text=thought)
@@ -120,32 +119,6 @@ class TUIPlugin(SkillPlugin):
         system_content = base_prompt
         if extra:
             system_content = f"{base_prompt}\n\n── system_prompt_extra ──\n{extra}" if base_prompt else extra
-        def _msg_preview(m: dict) -> dict:
-            role = m.get("role", "?")
-            content = m.get("content", "")
-            if isinstance(content, str):
-                return {"role": role, "content": content[:200]}
-            if isinstance(content, list):
-                parts = []
-                for b in content:
-                    if isinstance(b, dict):
-                        t = b.get("type", "?")
-                        if t == "tool_result":
-                            tu_id = b.get("tool_use_id", "")
-                            body = b.get("content", "")
-                            preview = body[:80] if isinstance(body, str) else str(body)[:80]
-                            parts.append(f"[tool_result:{tu_id}] {preview}")
-                        else:
-                            parts.append(f"[{t}]")
-                    elif hasattr(b, "type"):
-                        if b.type == "text":
-                            parts.append(getattr(b, "text", "")[:100])
-                        elif b.type == "tool_use":
-                            parts.append(f"[tool_use:{getattr(b, 'name', '?')}]")
-                        else:
-                            parts.append(f"[{b.type}]")
-                return {"role": role, "content": " | ".join(parts)[:300]}
-            return {"role": role, "content": str(content)[:200]}
 
         msgs_content = json.dumps(
             [_msg_preview(m) for m in ctx.messages],
@@ -164,19 +137,26 @@ class TUIPlugin(SkillPlugin):
         self._cumulative_output_tokens += output_tokens
 
         # Context breakdown: total = input_tokens (from API, accurate)
-        # System and tools are estimated; messages = total - system - tools
-        extra = ctx.metadata.get("system_prompt_extra", "")
-        system_est = _estimate_tokens(extra) + self._system_base_tokens
+        # Estimate per-category tokens from metadata
+        extra_parts = ctx.metadata.get("_system_extra_parts", {})
+        memory_est = _estimate_tokens(extra_parts.get("memory", ""))
+        # Skills + tool_catalog are small, fold into system prompt
+        skills_est = _estimate_tokens(extra_parts.get("skills", ""))
+        catalog_est = _estimate_tokens(extra_parts.get("tool_catalog", ""))
+        system_est = self._system_base_tokens + skills_est + catalog_est
         tool_est = self._get_active_tool_tokens() if self._get_active_tool_tokens else self._tool_tokens
         # Clamp estimates so they don't exceed actual input_tokens
-        if system_est + tool_est > input_tokens:
-            ratio = input_tokens / max(system_est + tool_est, 1)
+        total_est = system_est + tool_est + memory_est
+        if total_est > input_tokens:
+            ratio = input_tokens / max(total_est, 1)
             system_est = int(system_est * ratio)
             tool_est = int(tool_est * ratio)
-        msg_est = max(0, input_tokens - system_est - tool_est)
+            memory_est = int(memory_est * ratio)
+        msg_est = max(0, input_tokens - system_est - tool_est - memory_est)
         context = {
             "system": system_est,
             "tools": tool_est,
+            "memory": memory_est,
             "messages": msg_est,
         }
 
@@ -184,15 +164,15 @@ class TUIPlugin(SkillPlugin):
         self._emit("status",
                    iteration=ctx.iteration,
                    max_iterations=getattr(self, '_max_iterations', 30),
-                   input_tokens=self._cumulative_input_tokens,
-                   output_tokens=self._cumulative_output_tokens,
                    elapsed=elapsed,
                    episode_count=cur_count,
+                   compress_count=self._compress_count,
                    turn=self._total_turns,
                    context=context)
 
         # Detect compression (new episodes created)
         if cur_count > self._last_episode_count:
+            self._compress_count += 1
             self._last_episode_count = cur_count
             self._emit("episodes_updated")
 
@@ -221,53 +201,94 @@ def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // 3) if text else 0
 
 
+def _msg_preview(m: dict) -> dict:
+    """Summarize a message for the msgs detail panel."""
+    role = m.get("role", "?")
+    content = m.get("content", "")
+    if isinstance(content, str):
+        return {"role": role, "content": content[:200]}
+    if isinstance(content, list):
+        parts = []
+        for b in content:
+            if isinstance(b, dict):
+                t = b.get("type", "?")
+                if t == "tool_result":
+                    tu_id = b.get("tool_use_id", "")
+                    body = b.get("content", "")
+                    preview = body[:80] if isinstance(body, str) else str(body)[:80]
+                    parts.append(f"[tool_result:{tu_id}] {preview}")
+                else:
+                    parts.append(f"[{t}]")
+            elif hasattr(b, "type"):
+                if b.type == "text":
+                    parts.append(getattr(b, "text", "")[:100])
+                elif b.type == "tool_use":
+                    parts.append(f"[tool_use:{getattr(b, 'name', '?')}]")
+                else:
+                    parts.append(f"[{b.type}]")
+        return {"role": role, "content": " | ".join(parts)[:300]}
+    return {"role": role, "content": str(content)[:200]}
+
+
 # ============================================================
 # Custom Widgets
 # ============================================================
 
 class ContextUsagePanel(Widget):
-    """Displays context window token usage as a single stacked bar with color-coded segments."""
+    """Displays context window token usage as a stacked progress bar with category breakdown."""
 
     system_tokens: reactive[int] = reactive(0)
     tool_tokens: reactive[int] = reactive(0)
+    memory_tokens: reactive[int] = reactive(0)
     message_tokens: reactive[int] = reactive(0)
     threshold: reactive[int] = reactive(200000)
     compress_threshold: reactive[int] = reactive(100000)
+    model_name: reactive[str] = reactive("")
 
     def render(self) -> str:
-        total = self.system_tokens + self.tool_tokens + self.message_tokens
+        total = self.system_tokens + self.tool_tokens + self.memory_tokens + self.message_tokens
         cap = max(self.threshold, 1)
+        free = max(0, cap - total)
         usage_pct = total / cap
 
         bar_width = 30
 
-        # Calculate segment widths proportional to threshold
+        # Calculate segment widths proportional to context window
         sys_w = int(self.system_tokens / cap * bar_width)
         tool_w = int(self.tool_tokens / cap * bar_width)
+        mem_w = int(self.memory_tokens / cap * bar_width)
         msg_w = int(self.message_tokens / cap * bar_width)
-        used_w = sys_w + tool_w + msg_w
+        used_w = sys_w + tool_w + mem_w + msg_w
         if used_w > bar_width:
             msg_w = max(0, msg_w - (used_w - bar_width))
-        empty_w = bar_width - sys_w - tool_w - msg_w
+            used_w = sys_w + tool_w + mem_w + msg_w
+        empty_w = bar_width - used_w
 
-        # Build bar with compress threshold marker
-        bar_chars = list("█" * sys_w + "▓" * tool_w + "▒" * msg_w + "░" * empty_w)
+        # Build stacked bar: █=system ▓=tools ▒=memory ░=messages ·=free
+        bar_chars = list("█" * sys_w + "▓" * tool_w + "▒" * mem_w + "░" * msg_w + "·" * empty_w)
+        # Place compress threshold marker
         ct_pos = int(self.compress_threshold / cap * bar_width)
         if 0 < ct_pos < bar_width:
             bar_chars[ct_pos] = "▏"
         bar = "".join(bar_chars)
-        pct_str = f"{usage_pct:.0%}"
 
-        def cat_line(label: str, value: int, marker: str) -> str:
+        model_display = self.model_name or "unknown"
+        header = f" {bar} {_format_tokens(total)}/{_format_tokens(cap)} ({usage_pct:.0%})"
+        model_line = f" {model_display}"
+
+        def cat_line(marker: str, label: str, value: int) -> str:
             pct = value / cap * 100 if cap > 1 else 0
-            return f"  {marker} {label:<7} {_format_tokens(value):>6}  {pct:4.1f}%"
+            return f"  {marker} {label}: {_format_tokens(value)} ({pct:.1f}%)"
 
         lines = [
-            f" {bar} {_format_tokens(total):>6} / {_format_tokens(cap)} ({pct_str})",
-            cat_line("system", self.system_tokens, "█"),
-            cat_line("tools", self.tool_tokens, "▓"),
-            cat_line("msgs", self.message_tokens, "▒"),
-            f"  ▏ compress {_format_tokens(self.compress_threshold):>6}",
+            header,
+            model_line,
+            cat_line("█", "System prompt", self.system_tokens),
+            cat_line("▓", "Tools", self.tool_tokens),
+            cat_line("▒", "Memory", self.memory_tokens),
+            cat_line("░", "Messages", self.message_tokens),
+            cat_line("·", "Free space", free),
+            f"  ▏ Compress: {_format_tokens(self.compress_threshold)}",
         ]
         return "\n".join(lines)
 
@@ -335,9 +356,8 @@ class StatusBar(Static):
     turn: reactive[int] = reactive(0)
     iteration: reactive[int] = reactive(0)
     max_iterations: reactive[int] = reactive(30)
-    input_tokens: reactive[int] = reactive(0)
-    output_tokens: reactive[int] = reactive(0)
     episode_count: reactive[int] = reactive(0)
+    compress_count: reactive[int] = reactive(0)
     elapsed: reactive[float] = reactive(0.0)
     busy: reactive[bool] = reactive(False)
 
@@ -347,9 +367,8 @@ class StatusBar(Static):
             f" {status_icon}",
             f"turn {self.turn}",
             f"iter {self.iteration}/{self.max_iterations}",
-            f"in: {_format_tokens(self.input_tokens)}",
-            f"out: {_format_tokens(self.output_tokens)}",
             f"{self.episode_count} eps",
+            f"{self.compress_count} compress",
             f"{self.elapsed:.1f}s",
         ]
         return " │ ".join(parts)
@@ -420,7 +439,7 @@ class EpisodeCuratorApp(App):
     }
 
     #context-usage {
-        height: 9;
+        height: 12;
         border: solid #1e3a5f;
         border-title-color: #5dade2;
         background: #111d2b;
@@ -624,6 +643,7 @@ class EpisodeCuratorApp(App):
             ctx_panel = self.query_one("#context-usage", ContextUsagePanel)
             ctx_panel.threshold = self._context_window
             ctx_panel.compress_threshold = self._threshold
+            ctx_panel.model_name = worker_model
         except Exception:
             pass
 
@@ -641,11 +661,10 @@ class EpisodeCuratorApp(App):
         self._tui_plugin._max_iterations = self._agent.max_iterations
 
         # Estimate static token costs
-        import json as _json
         sys_prompt = getattr(self._agent, 'system_prompt', '')
         tools = self._agent._manager.get_all_tool_definitions()
         self._tui_plugin._system_base_tokens = _estimate_tokens(sys_prompt)
-        self._tui_plugin._tool_tokens = _estimate_tokens(_json.dumps(tools))
+        self._tui_plugin._tool_tokens = _estimate_tokens(json.dumps(tools))
 
         self._tui_plugin._get_tools_content = self._build_tools_content
         self._tui_plugin._get_active_tool_tokens = self._calc_active_tool_tokens
@@ -730,15 +749,15 @@ class EpisodeCuratorApp(App):
         status.turn = data.get("turn", 0)
         status.iteration = data.get("iteration", 0)
         status.max_iterations = data.get("max_iterations", 30)
-        status.input_tokens = data.get("input_tokens", 0)
-        status.output_tokens = data.get("output_tokens", 0)
         status.episode_count = data.get("episode_count", 0)
+        status.compress_count = data.get("compress_count", 0)
         status.elapsed = data.get("elapsed", 0.0)
 
         ctx = data.get("context", {})
         ctx_panel = self.query_one("#context-usage", ContextUsagePanel)
         ctx_panel.system_tokens = ctx.get("system", 0)
         ctx_panel.tool_tokens = ctx.get("tools", 0)
+        ctx_panel.memory_tokens = ctx.get("memory", 0)
         ctx_panel.message_tokens = ctx.get("messages", 0)
 
     def _refresh_episodes(self):

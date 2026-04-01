@@ -85,26 +85,30 @@ class ToolRegistryPlugin(SkillPlugin):
             self._expand_tool_history(ctx, tool_names)
         return None
 
-    def _compress_tool_history(self, ctx: AgentContext, tool_names: set[str]) -> None:
-        """Scan ctx.messages and compress tool_result content for the given tools."""
-        # Step 1: Build map of tool_use_id → tool_name from assistant messages
+    @staticmethod
+    def _build_tool_use_id_map(messages: list[dict]) -> dict[str, str]:
+        """Build a map of tool_use_id → tool_name from assistant messages."""
         id_to_name: dict[str, str] = {}
-        for msg in ctx.messages:
+        for msg in messages:
             if msg.get("role") != "assistant":
                 continue
             content = msg.get("content", [])
             if not isinstance(content, list):
                 continue
             for block in content:
-                # Handle both object-style (API response) and dict-style blocks
                 block_type = getattr(block, "type", None) or (block.get("type") if isinstance(block, dict) else None)
                 if block_type == "tool_use":
                     tu_id = getattr(block, "id", None) or (block.get("id") if isinstance(block, dict) else None)
                     tu_name = getattr(block, "name", None) or (block.get("name") if isinstance(block, dict) else None)
                     if tu_id and tu_name:
                         id_to_name[tu_id] = tu_name
+        return id_to_name
 
-        # Step 2: Compress matching tool_result blocks in user messages
+    def _compress_tool_history(self, ctx: AgentContext, tool_names: set[str]) -> None:
+        """Scan ctx.messages and compress tool_result content for the given tools."""
+        id_to_name = self._build_tool_use_id_map(ctx.messages)
+
+        # Compress matching tool_result blocks in user messages
         for msg in ctx.messages:
             if msg.get("role") != "user":
                 continue
@@ -137,21 +141,7 @@ class ToolRegistryPlugin(SkillPlugin):
         if not store:
             return
 
-        # Build id→name map
-        id_to_name: dict[str, str] = {}
-        for msg in ctx.messages:
-            if msg.get("role") != "assistant":
-                continue
-            content = msg.get("content", [])
-            if not isinstance(content, list):
-                continue
-            for block in content:
-                block_type = getattr(block, "type", None) or (block.get("type") if isinstance(block, dict) else None)
-                if block_type == "tool_use":
-                    tu_id = getattr(block, "id", None) or (block.get("id") if isinstance(block, dict) else None)
-                    tu_name = getattr(block, "name", None) or (block.get("name") if isinstance(block, dict) else None)
-                    if tu_id and tu_name:
-                        id_to_name[tu_id] = tu_name
+        id_to_name = self._build_tool_use_id_map(ctx.messages)
 
         # Restore matching tool_result blocks
         for msg in ctx.messages:
@@ -189,3 +179,4 @@ class ToolRegistryPlugin(SkillPlugin):
             ctx.metadata["system_prompt_extra"] = f"{existing}\n\n{catalog_text}"
         else:
             ctx.metadata["system_prompt_extra"] = catalog_text
+        ctx.metadata.setdefault("_system_extra_parts", {})["tool_catalog"] = catalog_text

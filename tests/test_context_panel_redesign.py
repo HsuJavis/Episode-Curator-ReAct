@@ -211,10 +211,11 @@ class TestContextUsagePanelRedesign:
         return EpisodeCuratorApp()
 
     def test_stacked_bar_has_all_segments(self):
-        """Rendered output should show a single bar with system/tools/msgs segments."""
+        """Rendered output should show a single bar with all category segments."""
         panel = ContextUsagePanel()
         panel.system_tokens = 2000
         panel.tool_tokens = 1000
+        panel.memory_tokens = 0
         panel.message_tokens = 7000
         panel.threshold = 200000
 
@@ -225,7 +226,8 @@ class TestContextUsagePanelRedesign:
         # Should have category breakdown below the bar
         assert "system" in rendered.lower()
         assert "tools" in rendered.lower()
-        assert "msgs" in rendered.lower()
+        assert "memory" in rendered.lower()
+        assert "messages" in rendered.lower()
 
     def test_shows_threshold(self):
         """Should show total vs threshold (e.g. 200k)."""
@@ -269,13 +271,13 @@ class TestContextUsagePanelRedesign:
         async with app.run_test(size=(120, 40)) as pilot:
             app._handle_event(TUIEvent("status", {
                 "iteration": 1, "max_iterations": 30,
-                "input_tokens": 10000, "output_tokens": 1000,
                 "elapsed": 3.0, "episode_count": 2,
-                "context": {"system": 2500, "tools": 1500, "messages": 6000},
+                "context": {"system": 2500, "tools": 1500, "memory": 500, "messages": 5500},
             }))
             await pilot.pause()
 
             ctx = app.query_one("#context-usage", ContextUsagePanel)
             assert ctx.system_tokens == 2500
             assert ctx.tool_tokens == 1500
-            assert ctx.message_tokens == 6000
+            assert ctx.memory_tokens == 500
+            assert ctx.message_tokens == 5500
